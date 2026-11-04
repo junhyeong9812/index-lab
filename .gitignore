@@ -1,5 +1,4 @@
 /target
-/results/*.csv
 .idea/
 .claude/
 __pycache__/
