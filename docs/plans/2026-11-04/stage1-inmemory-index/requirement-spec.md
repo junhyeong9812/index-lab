@@ -79,6 +79,7 @@ README(이 저장소) · Fagin 외 1979 "Extendible Hashing" · B+tree 표준 �
 | T11 | 속성 테스트 방식 | A 평범한 proptest + `Vec<Op>` 생성 — 의존성 1개, 읽기 쉬움 · B `proptest-state-machine` — 상태 기계 프레임워크, 축소(shrink)가 연산 단위로 정교, 의존성 +1·학습 비용 | **A** proptest + `Vec<Op>` |
 | T12 | 구조 관찰용 공개 API | A `depth()`(B+tree)·`global_depth()`/`bucket_count()`(Hash) + 불변식 검사 `check()` 공개 — 테스트와 3단계 실험이 같이 씀 · B 테스트 전용(`#[cfg(test)]`)만 | **A** 공개 (`depth`·`global_depth`·`bucket_count`·`check`) |
 | T13 | `range_rev` 위치 | A `Index` trait에 추가 — Hash도 전체 스캔 후 내림차순, 실험 격자에 역순 범위 축 · B B+tree 전용 메서드 | **A** trait에 추가 |
+| T14 | `range` 경계 (diff 01 직전 추가) | A 양끝 포함 `[lo, hi]` — SQL BETWEEN, `u64::MAX` 표현 가능, `lo > hi`면 빈 결과, 정답지 `BTreeMap::range(lo..=hi)` · B 반열림 `[lo, hi)` — `u64::MAX` 포함 불가 · C `RangeBounds<u64>` 제네릭 — 유연하나 `dyn Index` 불가(3단계 러너) | **A** `[lo, hi]` |
 
 ## 11. 디테일 계획 — diff 단위 (각 diff = lazy 이해 게이트 1회)
 
