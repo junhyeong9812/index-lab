@@ -16,7 +16,9 @@
 | 2026-11-08 | diff 03 btree.rs insert·insert_at·split_leaf + 루트 분할(새 루트)을 04에서 03으로 당김(첫 리프 분할부터 필요) — 04에는 내부 분할만 남음. scratch 스모크 4/4(순차·역순 60개 max 3, 섞인 200개 max 4·2: insert 반환·get이 BTreeMap과 일치, next 체인 오름차순·prev 체인 내림차순 전체 일치, 첫 분할 [30]→[10,20]|[30,40]). **clippy 실패**: Node의 expect(dead_code) 미충족(split_leaf에서 prev를 바인딩해 읽음으로 집계) · **fmt 실패**: 주석 앞 공백 2칸 → 03b에서 수정 | 03 게이트 대기 |
 | 2026-11-09 | diff 03 게이트 1차 답변 판정(Opus 워커) — 전파 경로(재귀 반환·keys/children 끼우기)만 충족, split_leaf 동작·구분자(오른쪽 첫 키 복사)·링크 재연결·루트 분할(새 루트) 누락 | fail 1/2 — 정답 비노출 재질문 |
 | 2026-11-09 | diff 03 2차 시도 대신 사용자가 설명 요청 → 2차 기회 포기로 보고 fail 2/2 규칙 적용(정답 설명 후 통과 처리) — 누락 4점(반 나눔·오른쪽 첫 키 복사·링크 4개·새 루트) 설명 | 03 통과(2/2 설명) |
-| 2026-11-09 | diff 03b btree.rs — Node의 `#[expect(dead_code)]` 삭제(prev 바인딩으로 미충족) · 주석 앞 공백 2→1(fmt). 사용자 요청: 커밋·push 후 다음 진행 → cargo test exit 0 · clippy -D warnings 통과 · fmt --check 통과 · scratch 스모크 4/4 재통과. 사용자 요청으로 구조·알고리즘 그림 문서 docs/learning/stage1/btree.md 작성 | 03b 게이트 대기(커밋·push 사용자 요청) |
+| 2026-11-09 | diff 03b btree.rs — Node의 `#[expect(dead_code)]` 삭제(prev 바인딩으로 미충족) · 주석 앞 공백 2→1(fmt). 사용자 요청: 커밋·push 후 다음 진행 → cargo test exit 0 · clippy -D warnings 통과 · fmt --check 통과 · scratch 스모크 4/4 재통과. 사용자 요청으로 구조·알고리즘 그림 문서 docs/learning/stage1/btree.md 작성 | 03b 커밋 e63d31c(코드)·664ec96(docs), 브랜치 push(사용자 요청) |
+| 2026-11-09 | diff 03b 게이트 — 판정 워커(Opus) | PASS 1/2 (보충: -D warnings가 unfulfilled_lint_expectations 경고를 오류로 올림 — 답변에서 생략, 허용) |
+| 2026-11-09 | diff 04 btree.rs — 내부 노드 넘침 시 split_internal(push-up: 가운데 키를 위로 이동, 오른쪽 키·자식을 새 Internal로) · ponytail 주석 제거 — **스니펫만 기록, 코드 미적용**. 사용자 요청: 지금까지를 main에 ff 병합(664ec96) → 새 브랜치 feat/stage1-internal-split, 세션 끊고 재개 | 다음 세션: 04 코드 적용부터 |
 
 ## diff 기록 (before/after — 판정 워커 그라운드 트루스)
 
@@ -330,4 +332,51 @@ before = diff 02a 스니펫. 변경분(`diff -u`, 실파일):
 ```diff
 -            prev: Some(id),  // A'.prev = A
 +            prev: Some(id), // A'.prev = A
+```
+
+### diff 04 — 내부 노드 분할(push-up)
+
+`insert_at`의 Internal 팔 — before:
+
+```rust
+                    keys.insert(i, sep);
+                    children.insert(i + 1, right);
+                    // ponytail: 내부 노드 넘침(keys.len() > max_keys)은 아직 그대로 둔다 — diff 04에서 push-up 분할.
+                }
+                (old, None)
+```
+
+after:
+
+```rust
+                    keys.insert(i, sep);
+                    children.insert(i + 1, right);
+                    if keys.len() > self.max_keys {
+                        return (old, Some(self.split_internal(id)));
+                    }
+                }
+                (old, None)
+```
+
+새 함수(before: 없음):
+
+```rust
+    /// 넘친 내부 노드를 가운데 키 기준으로 나눈다. 가운데 키는 위로 "이동"한다(push-up — 아래에 남지 않는다).
+    /// keys [k0 .. k(mid-1)] · k(mid) · [k(mid+1) ..] → 왼쪽(id) · 부모로 · 오른쪽(새 노드)
+    /// 자식은 mid+1개가 왼쪽에 남고 나머지가 오른쪽으로 간다.
+    fn split_internal(&mut self, id: NodeId) -> Split {
+        let new_id = self.nodes.len();
+        let Node::Internal { keys, children } = &mut self.nodes[id] else {
+            unreachable!("split_internal은 내부 노드에만 쓴다");
+        };
+        let mid = keys.len() / 2;
+        let right_keys = keys.split_off(mid + 1);
+        let sep = keys.pop().expect("mid < len이므로 가운데 키가 있다");
+        let right_children = children.split_off(mid + 1);
+        self.nodes.push(Node::Internal {
+            keys: right_keys,
+            children: right_children,
+        });
+        (sep, new_id)
+    }
 ```
