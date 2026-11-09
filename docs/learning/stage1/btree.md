@@ -1,4 +1,4 @@
-# B+tree — 구조 · 알고리즘 그림 정리 (1단계, diff 03 기준)
+# B+tree — 구조 · 알고리즘 그림 정리 (1단계, diff 04 기준)
 
 > 코드: `src/index/btree.rs` · 계약: `src/index/mod.rs`의 `Index` trait · 기록: `docs/plans/2026-11-04/stage1-inmemory-index/log.md`
 > ✅ = 지금 코드에 있음 · ⏳ = 다음 diff에서 들어옴
@@ -184,7 +184,7 @@ children.insert(2, L1')   → [L0, L1, L1', L2]
                                  [10,20] [30,40] [50,60] [70,80] [90,100]
 ```
 
-**⏳ diff 04 — 내부 노드 분할(push-up)** 이 들어오면 여기서 루트가 갈라진다:
+**✅ diff 04 — 내부 노드 분할(push-up)** 로 여기서 루트가 갈라진다:
 
 ```text
 넘친 내부 [30 | 50 | 70 | 90]   가운데 70을 위로 "이동" (복사 아님 — 내부엔 70이 남지 않음)
@@ -201,9 +201,9 @@ children.insert(2, L1')   → [L0, L1, L1', L2]
 | 올라가는 키 | 오른쪽 리프의 첫 키 | 가운데 키 |
 | 아래에 남나? | **남는다** (값이 리프에 있음) | **안 남는다** (이정표일 뿐) |
 | 링크 | prev/next 4개 고침 | 없음 — 자식 목록만 나눔 |
-| 상태 | ✅ diff 03 | ⏳ diff 04 |
+| 상태 | ✅ diff 03 | ✅ diff 04 |
 
-> 지금(diff 03)은 내부 노드가 넘쳐도 그대로 둔다(`ponytail:` 주석). 결과는 맞지만 루트가 계속 넓어지기만 해서 깊이가 2에서 멈춘다.
+> diff 03까지는 내부 노드가 넘쳐도 그대로 뒀다. diff 04부터 `split_internal`이 같은 `Split`을 돌려줘 부모·루트 코드 변경 없이 위로 전파된다.
 
 ---
 
@@ -227,7 +227,7 @@ range_rev:       find_leaf(65) → prev 따라 왼쪽으로
 | 01 | crate · `Index` trait · proptest dev-dep | ✅ |
 | 02 | 노드 구조 · `get` · `find_leaf` | ✅ |
 | 03 | `insert` · 리프 분할 · 링크 · 루트 분할 (+03b clippy·fmt) | ✅ |
-| 04 | 내부 노드 분할 (push-up) | ⏳ |
+| 04 | 내부 노드 분할 (push-up) | ✅ |
 | 05 | `range` · `range_rev` · `impl Index for BTree` | ⏳ |
 | 06 | 테스트: 단위 + proptest(BTreeMap 비교) + 구조 검사 | ⏳ |
 | 07~09 | Extendible Hash | ⏳ |
