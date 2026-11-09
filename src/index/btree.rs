@@ -95,11 +95,32 @@ impl BTree {
                     };
                     keys.insert(i, sep);
                     children.insert(i + 1, right);
-                    // ponytail: 내부 노드 넘침(keys.len() > max_keys)은 아직 그대로 둔다 — diff 04에서 push-up 분할.
+                    if keys.len() > self.max_keys {
+                        return (old, Some(self.split_internal(id)));
+                    }
                 }
                 (old, None)
             }
         }
+    }
+
+    /// 넘친 내부 노드를 가운데 키 기준으로 나눈다. 가운데 키는 위로 "이동"한다(push-up — 아래에 남지 않는다).
+    /// keys [k0 .. k(mid-1)] · k(mid) · [k(mid+1) ..] → 왼쪽(id) · 부모로 · 오른쪽(새 노드)
+    /// 자식은 mid+1개가 왼쪽에 남고 나머지가 오른쪽으로 간다.
+    fn split_internal(&mut self, id: NodeId) -> Split {
+        let new_id = self.nodes.len();
+        let Node::Internal { keys, children } = &mut self.nodes[id] else {
+            unreachable!("split_internal은 내부 노드에만 쓴다");
+        };
+        let mid = keys.len() / 2;
+        let right_keys = keys.split_off(mid + 1);
+        let sep = keys.pop().expect("mid < len이므로 가운데 키가 있다");
+        let right_children = children.split_off(mid + 1);
+        self.nodes.push(Node::Internal {
+            keys: right_keys,
+            children: right_children,
+        });
+        (sep, new_id)
     }
 
     /// 넘친 리프 A를 반으로 나눠 오른쪽 절반을 새 리프 A'로 옮긴다.
