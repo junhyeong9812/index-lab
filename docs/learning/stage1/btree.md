@@ -1,6 +1,7 @@
 # B+tree — 구조 · 알고리즘 그림 정리 (1단계, diff 04 기준)
 
 > 코드: `src/index/btree.rs` · 계약: `src/index/mod.rs`의 `Index` trait · 기록: `docs/plans/2026-11-04/stage1-inmemory-index/log.md`
+> 질문·답변 정리와 오답 노트: [btree-qa.md](btree-qa.md)
 > ✅ = 지금 코드에 있음 · ⏳ = 다음 diff에서 들어옴
 
 ---
