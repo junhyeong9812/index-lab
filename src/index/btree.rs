@@ -168,4 +168,74 @@ impl BTree {
             }
         }
     }
+
+    /// `lo <= key <= hi`를 오름차순으로. lo가 있어야 할 리프에서 시작해 next 링크만 따라간다(내부 노드 재방문 없음).
+    pub fn range(&self, lo: u64, hi: u64) -> Vec<(u64, u64)> {
+        let mut out = Vec::new();
+        if lo > hi {
+            return out;
+        }
+        let mut cur = Some(self.find_leaf(lo));
+        while let Some(id) = cur {
+            let Node::Leaf {
+                keys, values, next, ..
+            } = &self.nodes[id]
+            else {
+                unreachable!("리프의 next는 리프다");
+            };
+            let start = keys.partition_point(|&k| k < lo); // 첫 리프에서만 의미 있음(이후 리프는 전부 ≥ lo)
+            for (&k, &v) in keys[start..].iter().zip(&values[start..]) {
+                if k > hi {
+                    return out;
+                }
+                out.push((k, v));
+            }
+            cur = *next;
+        }
+        out
+    }
+
+    /// `range`와 같은 범위를 내림차순으로. hi가 있어야 할 리프에서 시작해 prev 링크만 따라간다.
+    pub fn range_rev(&self, lo: u64, hi: u64) -> Vec<(u64, u64)> {
+        let mut out = Vec::new();
+        if lo > hi {
+            return out;
+        }
+        let mut cur = Some(self.find_leaf(hi));
+        while let Some(id) = cur {
+            let Node::Leaf {
+                keys, values, prev, ..
+            } = &self.nodes[id]
+            else {
+                unreachable!("리프의 prev는 리프다");
+            };
+            let end = keys.partition_point(|&k| k <= hi); // 첫 리프에서만 의미 있음(이전 리프는 전부 ≤ hi)
+            for (&k, &v) in keys[..end].iter().zip(&values[..end]).rev() {
+                if k < lo {
+                    return out;
+                }
+                out.push((k, v));
+            }
+            cur = *prev;
+        }
+        out
+    }
+}
+
+impl super::Index for BTree {
+    fn insert(&mut self, key: u64, value: u64) -> Option<u64> {
+        BTree::insert(self, key, value)
+    }
+
+    fn get(&self, key: u64) -> Option<u64> {
+        BTree::get(self, key)
+    }
+
+    fn range(&self, lo: u64, hi: u64) -> Vec<(u64, u64)> {
+        BTree::range(self, lo, hi)
+    }
+
+    fn range_rev(&self, lo: u64, hi: u64) -> Vec<(u64, u64)> {
+        BTree::range_rev(self, lo, hi)
+    }
 }
