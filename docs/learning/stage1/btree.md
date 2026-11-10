@@ -1,4 +1,4 @@
-# B+tree — 구조 · 알고리즘 그림 정리 (1단계, diff 04 기준)
+# B+tree — 구조 · 알고리즘 그림 정리 (1단계, diff 05 기준)
 
 > 코드: `src/index/btree.rs` · 계약: `src/index/mod.rs`의 `Index` trait · 기록: `docs/plans/2026-11-04/stage1-inmemory-index/log.md`
 > 질문·답변 정리와 오답 노트: [btree-qa.md](btree-qa.md)
@@ -11,7 +11,7 @@
 ```text
 src/lib.rs                 pub mod index;
  └ src/index/mod.rs         pub trait Index { insert · get · range · range_rev }   ← 약속(계약)
-    ├ src/index/btree.rs    pub struct BTree   ✅ (Index 구현은 ⏳ diff 05)
+    ├ src/index/btree.rs    pub struct BTree   ✅ (impl Index ✅ diff 05)
     └ src/index/hash.rs     ⏳ diff 07~09 (Extendible Hash)
 
 정답지: std::collections::BTreeMap<u64, u64> — 모든 결과를 이것과 비교 (⏳ diff 06 proptest)
@@ -208,7 +208,7 @@ children.insert(2, L1')   → [L0, L1, L1', L2]
 
 ---
 
-## 10. 범위 읽기 ⏳ diff 05
+## 10. 범위 읽기 ✅ diff 05
 
 ```text
 range(25, 65):   find_leaf(25) → 그 리프부터 next 따라 오른쪽으로, 65 넘으면 멈춤
@@ -229,7 +229,7 @@ range_rev:       find_leaf(65) → prev 따라 왼쪽으로
 | 02 | 노드 구조 · `get` · `find_leaf` | ✅ |
 | 03 | `insert` · 리프 분할 · 링크 · 루트 분할 (+03b clippy·fmt) | ✅ |
 | 04 | 내부 노드 분할 (push-up) | ✅ |
-| 05 | `range` · `range_rev` · `impl Index for BTree` | ⏳ |
+| 05 | `range` · `range_rev` · `impl Index for BTree` | ✅ |
 | 06 | 테스트: 단위 + proptest(BTreeMap 비교) + 구조 검사 | ⏳ |
 | 07~09 | Extendible Hash | ⏳ |
 | 10 | 변이 테스트 · 마무리 | ⏳ |

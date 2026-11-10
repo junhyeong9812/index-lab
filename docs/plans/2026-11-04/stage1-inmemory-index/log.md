@@ -24,6 +24,10 @@
 | 2026-11-09 | diff 04 게이트 1차 — 판정 워커(Opus) | fail 1/2: 나누는 방식·Split 동일 형태로 인한 전파 누락, push-up은 "위로 등록"만(아래에 안 남음·copy-up 대비 누락). 오개념 2: "중간값이 더 빨리 도달"(get은 항상 리프까지), "값이 리프에 몰린 구조가 아니다"(B+tree는 값이 리프에만) → 정답 비노출 재질문 |
 | 2026-11-09 | diff 04 게이트 2차 — 판정 워커(Opus) | fail 2/2 → 정답 설명 후 통과 처리: 자식 분배(mid+1개 왼쪽)·오른쪽은 새 노드, 가운데 키는 내부 노드에서 빠짐(리프 copy-up과 대비), Split 반환 형태가 같아 부모·루트 코드 무변경 전파 설명. 잔여 오개념(가운데 키가 리프에서 올라온다) 정정 |
 | 2026-11-09 | 사용자 요청: diff 04 Q&A(키·자식 개수, 칸막이·구간, 70 귀속)와 diff 03~04 게이트 오답 노트를 docs/learning/stage1/btree-qa.md로 문서화 | 문서 커밋 |
+| 2026-11-09 | 브랜치 feat/stage1-range(feat/stage1-internal-split 위에서 분기 — 주제별 브랜치 관례). diff 05 btree.rs — range(find_leaf(lo)부터 next) · range_rev(find_leaf(hi)부터 prev) · `impl Index for BTree`(4메서드 위임) | 05 코드 적용 |
+| 2026-11-09 | diff 05 → cargo test exit 0 · clippy -D warnings · fmt --check 통과. scratch 스모크 3/3: max 2·3·4·7 × 키 1500개에서 경계점 13×13 조합 + 무작위 800구간(lo>hi 포함) + [0,MAX]·[MAX,MAX] 모두 BTreeMap::range와 일치(range·range_rev, dyn Index 경유), 빈 트리·키 1개, 그림 예 range(25,65)=[30,40,50,60] | 05 게이트 대기 |
+| 2026-11-09 | diff 05 게이트 1차 — 판정 워커(Opus) | fail 1/2: 시작점(lo·hi)만 충족, next/prev 링크·정지 조건(k>hi / k<lo, hi 포함)·내부 노드 1회·C.prev 누락 시 빠지는 키(A')와 이유 누락 → 정답 비노출 재질문. 사이드 질문(역순 필요성)은 ORDER BY DESC LIMIT·T7/T13 근거로 답변, iterator화는 NEXT 후보 |
+| 2026-11-10 | diff 05 게이트 2차 — 사용자 요청으로 ①~④를 하나씩 질의(코드만 제시, 정답 비노출) → 합쳐서 판정 워커(Opus) | PASS 2/2 (사소한 생략: 체인 끝 정지). 사이드 질문 "C.prev가 왜 꼭 필요한가" — 각 방향 체인에서 A'로 들어가는 길이 하나뿐(I2) 답변 |
 
 ## diff 기록 (before/after — 판정 워커 그라운드 트루스)
 
@@ -384,4 +388,86 @@ after:
         });
         (sep, new_id)
     }
+```
+
+### diff 05 — `range` · `range_rev` · `impl Index for BTree`
+
+before: `find_leaf`가 `impl BTree`의 마지막 메서드, 파일 끝.
+
+after — `find_leaf` 뒤(`impl BTree` 안)에 추가:
+
+```rust
+    /// `lo <= key <= hi`를 오름차순으로. lo가 있어야 할 리프에서 시작해 next 링크만 따라간다(내부 노드 재방문 없음).
+    pub fn range(&self, lo: u64, hi: u64) -> Vec<(u64, u64)> {
+        let mut out = Vec::new();
+        if lo > hi {
+            return out;
+        }
+        let mut cur = Some(self.find_leaf(lo));
+        while let Some(id) = cur {
+            let Node::Leaf {
+                keys, values, next, ..
+            } = &self.nodes[id]
+            else {
+                unreachable!("리프의 next는 리프다");
+            };
+            let start = keys.partition_point(|&k| k < lo); // 첫 리프에서만 의미 있음(이후 리프는 전부 ≥ lo)
+            for (&k, &v) in keys[start..].iter().zip(&values[start..]) {
+                if k > hi {
+                    return out;
+                }
+                out.push((k, v));
+            }
+            cur = *next;
+        }
+        out
+    }
+
+    /// `range`와 같은 범위를 내림차순으로. hi가 있어야 할 리프에서 시작해 prev 링크만 따라간다.
+    pub fn range_rev(&self, lo: u64, hi: u64) -> Vec<(u64, u64)> {
+        let mut out = Vec::new();
+        if lo > hi {
+            return out;
+        }
+        let mut cur = Some(self.find_leaf(hi));
+        while let Some(id) = cur {
+            let Node::Leaf {
+                keys, values, prev, ..
+            } = &self.nodes[id]
+            else {
+                unreachable!("리프의 prev는 리프다");
+            };
+            let end = keys.partition_point(|&k| k <= hi); // 첫 리프에서만 의미 있음(이전 리프는 전부 ≤ hi)
+            for (&k, &v) in keys[..end].iter().zip(&values[..end]).rev() {
+                if k < lo {
+                    return out;
+                }
+                out.push((k, v));
+            }
+            cur = *prev;
+        }
+        out
+    }
+```
+
+after — 파일 끝에 추가:
+
+```rust
+impl super::Index for BTree {
+    fn insert(&mut self, key: u64, value: u64) -> Option<u64> {
+        BTree::insert(self, key, value)
+    }
+
+    fn get(&self, key: u64) -> Option<u64> {
+        BTree::get(self, key)
+    }
+
+    fn range(&self, lo: u64, hi: u64) -> Vec<(u64, u64)> {
+        BTree::range(self, lo, hi)
+    }
+
+    fn range_rev(&self, lo: u64, hi: u64) -> Vec<(u64, u64)> {
+        BTree::range_rev(self, lo, hi)
+    }
+}
 ```
