@@ -28,6 +28,8 @@
 | 2026-11-09 | diff 05 → cargo test exit 0 · clippy -D warnings · fmt --check 통과. scratch 스모크 3/3: max 2·3·4·7 × 키 1500개에서 경계점 13×13 조합 + 무작위 800구간(lo>hi 포함) + [0,MAX]·[MAX,MAX] 모두 BTreeMap::range와 일치(range·range_rev, dyn Index 경유), 빈 트리·키 1개, 그림 예 range(25,65)=[30,40,50,60] | 05 게이트 대기 |
 | 2026-11-09 | diff 05 게이트 1차 — 판정 워커(Opus) | fail 1/2: 시작점(lo·hi)만 충족, next/prev 링크·정지 조건(k>hi / k<lo, hi 포함)·내부 노드 1회·C.prev 누락 시 빠지는 키(A')와 이유 누락 → 정답 비노출 재질문. 사이드 질문(역순 필요성)은 ORDER BY DESC LIMIT·T7/T13 근거로 답변, iterator화는 NEXT 후보 |
 | 2026-11-10 | diff 05 게이트 2차 — 사용자 요청으로 ①~④를 하나씩 질의(코드만 제시, 정답 비노출) → 합쳐서 판정 워커(Opus) | PASS 2/2 (사소한 생략: 체인 끝 정지). 사이드 질문 "C.prev가 왜 꼭 필요한가" — 각 방향 체인에서 A'로 들어가는 길이 하나뿐(I2) 답변 |
+| 2026-11-10 | 사용자 요청: main에 ff 병합(b8887da, diff 04·05 포함) → test·clippy·fmt 재확인 → main push → 브랜치 feat/stage1-btree-tests. diff 06 테스트 설계는 블라인드 워커(Opus — spec·trait·타입 정의만, 알고리즘 본문 미열람)에 위임 | 06 설계 대기 |
+| 2026-11-10 | 사용자 요청: diff 05 설명(range/range_rev 동작·비교표, 내부 노드 1회 하강, 역순 필요성, C.prev 필요성, impl Index)을 btree.md §10으로 문서화 | 문서 커밋 |
 
 ## diff 기록 (before/after — 판정 워커 그라운드 트루스)
 

@@ -208,16 +208,105 @@ children.insert(2, L1')   → [L0, L1, L1', L2]
 
 ---
 
-## 10. 범위 읽기 ✅ diff 05
+## 10. 범위 읽기 (`range` · `range_rev`) ✅ diff 05
 
-```text
-range(25, 65):   find_leaf(25) → 그 리프부터 next 따라 오른쪽으로, 65 넘으면 멈춤
-                 [10,20] → [30,40] → [50,60] → [70,80]✗
-                    25↑      30 40    50 60      70>65 stop
-range_rev:       find_leaf(65) → prev 따라 왼쪽으로
+### 10-1. `range(lo, hi)` — lo의 리프에서 시작해 `next`를 따라감
+
+```rust
+let mut cur = Some(self.find_leaf(lo));            // 위에서 한 번만 내려옴
+while let Some(id) = cur {
+    let start = keys.partition_point(|&k| k < lo); // 이 리프에서 lo 이상이 시작되는 자리
+    for (&k, &v) in keys[start..].iter().zip(&values[start..]) {
+        if k > hi { return out; }                  // hi "보다 큰" 키에서 끝 (hi 자신은 포함)
+        out.push((k, v));
+    }
+    cur = *next;                                   // 오른쪽 리프로 (None이면 체인 끝 → 종료)
+}
 ```
 
-내부 노드를 다시 타지 않고 **리프 연결만 따라간다** — B+tree가 범위 조회에 강한 이유.
+```text
+range(25, 65)
+           [70]
+        /        \
+   [30|50]        [90]
+  ↓find_leaf(25)
+ [10,20] → [30,40] → [50,60] → [70,80] ✗
+  25 미만    30 40     50 60     70 > 65 → 끝
+결과 [30, 40, 50, 60]
+```
+
+- **시작**: `find_leaf(lo)` — lo가 있어야 할 리프.
+- **이동**: `next` 링크로 오른쪽 리프.
+- **정지**: 처음으로 `k > hi`인 키를 만날 때, 또는 `next == None`(체인 끝). 양끝 포함 `[lo, hi]`(T14).
+- `start`는 첫 리프에서만 의미 있다 — 다음 리프부터는 키가 전부 ≥ lo라 `start = 0`.
+- `lo > hi`면 빈 결과(01a의 약속).
+
+### 10-2. `range_rev(lo, hi)` — 거울처럼 반대로
+
+```rust
+let mut cur = Some(self.find_leaf(hi));            // hi의 리프에서 시작
+let end = keys.partition_point(|&k| k <= hi);      // 이 리프에서 hi 이하가 끝나는 자리
+for (...) in keys[..end]...rev() {                 // 뒤에서부터 → 내림차순
+    if k < lo { return out; }                      // lo "보다 작은" 키에서 끝
+    out.push((k, v));
+}
+cur = *prev;                                       // 왼쪽 리프로
+```
+
+| | `range` | `range_rev` |
+|---|---|---|
+| 시작 리프 | `find_leaf(lo)` | `find_leaf(hi)` |
+| 따라가는 링크 | `next` | `prev` |
+| 출력 순서 | 오름차순 | 내림차순(`.rev()`) |
+| 정지 | 첫 `k > hi` | 첫 `k < lo` |
+
+diff 03에서 맞춘 **`prev` 링크와 `C.prev = A'`가 처음 실제로 쓰이는 곳.** C.prev를 안 고쳤다면 C의 prev가 여전히 A를 가리켜 `range_rev`가 A'를 건너뛰고 A'의 키가 통째로 빠진다(정순 `range`는 영향 없음).
+
+### 10-3. 내부 노드는 몇 번 거치나
+
+- 루트 → 리프로 **한 번** 내려간다(`find_leaf` 1회). 그 길에 높이만큼 내부 노드를 지난다 — 위 그림에선 `[70]`, `[30|50]` 2개.
+- 그 뒤로는 **리프 → 리프로 바로** 옮겨 다니고 내부 노드로 다시 올라가지 않는다.
+- 그래서 범위 조회 비용 ≈ 높이(내려가기 1회) + 읽은 리프 수. B+tree가 범위 조회에 강한 이유.
+
+### 10-4. 역순은 왜 필요한가 — 결과는 같고, "끝까지 읽느냐"가 다르다
+
+`range_rev(lo, hi)` = `range(lo, hi)`를 뒤집은 것과 **같은 결과**다. 차이는 읽는 양:
+
+```sql
+SELECT * FROM orders WHERE id <= 1000000 ORDER BY id DESC LIMIT 10;   -- 최신 10개
+```
+
+| 방법 | 읽는 양 |
+|---|---|
+| 정순으로 전부 → 뒤집기 → 10개 | 100만 개 전부 |
+| 역순: `find_leaf(1000000)`에서 `prev`로 10개 읽고 멈춤 | 리프 한두 개 |
+
+- 근거(명세): T7 양방향 리프(InnoDB `FIL_PAGE_PREV/NEXT`·PostgreSQL `btpo_prev/next` — 역방향 스캔에 사용), T13 `range_rev`를 trait에(Hash와의 실험 축).
+- ⚠️ 지금은 `Vec`으로 전부 모아 돌려주므로 "N개만 읽고 멈추기"는 아직 못 한다 — iterator화는 다음 작업 후보.
+
+### 10-5. `C.prev`는 왜 꼭 고쳐야 하나
+
+| 방향 | 책임 링크 | 안 고치면 |
+|---|---|---|
+| 정순 `next` | `A.next = A'`, `A'.next = C` | `range`가 A'를 건너뜀 |
+| 역순 `prev` | `C.prev = A'`, `A'.prev = A` | `range_rev`가 A'를 건너뜀 |
+
+각 방향 체인에서 A'로 들어가는 길은 **하나뿐**(next 쪽 A.next, prev 쪽 C.prev). 불변식 I2: next로도 prev로도 모든 키를 한 번씩, `a.next = b` ⇔ `b.prev = a`.
+단방향이었다면 C.prev도 없다 — 양방향의 대가 = 분할 때 C를 한 번 더 쓰기(2단계에서 페이지 쓰기 +1로 측정).
+
+### 10-6. `impl Index for BTree`
+
+```rust
+impl super::Index for BTree {
+    fn insert(&mut self, key: u64, value: u64) -> Option<u64> { BTree::insert(self, key, value) }
+    fn get(...)       { BTree::get(self, key) }
+    fn range(...)     { BTree::range(self, lo, hi) }
+    fn range_rev(...) { BTree::range_rev(self, lo, hi) }
+}
+```
+
+- 01a의 약속(trait)을 B+tree가 지킨다는 선언 → `Box<dyn Index>`로 Hash와 바꿔 끼울 수 있다(3단계 러너).
+- 몸통은 이미 있는 메서드 호출뿐. `BTree::insert(self, …)`처럼 경로를 다 쓰는 건 trait 메서드가 자기 자신을 재귀 호출하는 실수를 피하려는 것.
 
 ---
 
