@@ -1,4 +1,4 @@
-# B+tree — 구조 · 알고리즘 그림 정리 (1단계, diff 05 기준)
+# B+tree — 구조 · 알고리즘 그림 정리 (1단계, diff 06 기준)
 
 > 코드: `src/index/btree.rs` · 계약: `src/index/mod.rs`의 `Index` trait · 기록: `docs/plans/2026-11-04/stage1-inmemory-index/log.md`
 > 질문·답변 정리와 오답 노트: [btree-qa.md](btree-qa.md)
@@ -310,7 +310,89 @@ impl super::Index for BTree {
 
 ---
 
-## 11. 진행표
+## 11. 테스트와 구조 검사 ✅ diff 06
+
+### 11-1. 어떻게 만들었나 — 약속에서 출발한 테스트
+
+- 테스트 설계는 **구현 코드를 보지 않은 별도 워커**가 명세(I1·I2·I4)·trait·구조체 정의만 보고 했다.
+  "코드가 이렇게 생겼으니 이렇게 테스트"가 아니라 "**약속이 이러니 이걸 확인**"에서 출발.
+- 명세 T12대로 `depth()`·`check()`는 **공개 API**(`pub fn`) — 테스트와 3단계 실험이 같이 쓴다.
+
+### 11-2. `pub fn check(&self)` — 트리가 B+tree 모양인지 전수 검사 (I2)
+
+트리를 한 번 돌며 하나라도 어긋나면 이유와 함께 panic.
+
+```text
+노드마다 (walk)                           리프 사슬 전체
+ ├ 한 번만 방문 (공유·순환·고아 노드 없음)    ├ 모든 리프 깊이 같음
+ ├ 키 수 ≤ max_keys, 엄격 오름차순          ├ 첫 리프 prev = None, 끝 리프 next = None
+ ├ 구분자 범위 [lo, hi) 안에 키가 있음      ├ a.next = b ⇔ b.prev = a
+ ├ 비루트 하한: 리프 ⌈m/2⌉, 내부 ⌊m/2⌋     ├ next 사슬 = 트리를 왼→오로 본 리프 순서
+ ├ 내부: 자식 = 키 + 1                     └ prev 사슬 = 그 역순
+ └ 구분자 = 오른쪽 서브트리의 최소 키
+```
+
+**구분자 범위는 위에서 물려받는다.** 부모를 지날 때마다 칸막이가 허용 범위 `[lo, hi)`를 좁힌다.
+
+```text
+           [70]                  왼쪽 자식 [−, 70) · 오른쪽 [70, −)
+        /        \
+   [30|50]        [90]           [30|50] 아래: [−, 30) · [30, 50) · [50, 70)
+```
+
+```rust
+let clo = if i == 0 { lo } else { Some(keys[i - 1]) };   // i번 자식의 아래 경계 = 왼쪽 칸막이(없으면 물려받은 lo)
+let chi = if i < keys.len() { Some(keys[i]) } else { hi }; // 위 경계 = 오른쪽 칸막이(없으면 물려받은 hi)
+let min = walk(t, c, depth + 1, clo, chi, w);
+```
+
+범위를 벗어난 키가 하나라도 있으면 "왼쪽 < 구분자 ≤ 오른쪽"이 깨진 것. 덤으로 "구분자 = 오른쪽 서브트리의 최소 키"도 확인한다(copy-up·push-up이고 삭제가 없으니 성립 — 삭제가 생기면 완화해야 함).
+
+**하한 ⌈m/2⌉ · ⌊m/2⌋의 출처**
+
+- 리프: max+1개를 반으로 → 작은 쪽도 ⌈m/2⌉개.
+- 내부: max+1개 중 가운데 1개를 올리고 남은 max개를 반으로 → ⌊m/2⌋개.
+- 삭제가 없으니 이보다 작아질 일이 없다. (명세의 "⌈max/2⌉ − 1 수준"보다 촘촘한 값.)
+
+`pub fn depth()` — 맨 왼쪽 길로 내려가며 센 노드 수. 3단계에서 "fan-out에 따라 높이가 어떻게 되나"를 잴 때 쓴다.
+
+### 11-3. 단위 테스트 13개 — 손으로 그린 장면을 그대로 확인
+
+| 테스트 | 확인하는 것 |
+|---|---|
+| `first_leaf_split_copies_up_separator` | 10~40 → 루트 `[30]`, 리프 `[10,20]`·`[30,40]`, 30이 리프에 남음(copy-up), 링크 4방향 |
+| `internal_split_pushes_up_middle_and_grows_root` | 10~100 → 루트 `[70]`, `[30,50]`·`[90]`, 깊이 3 (9절 그림) |
+| `upsert_*` 3개 | 이전 값 반환, 꽉 찬 리프에 upsert해도 **노드가 새로 안 생김** |
+| `range_boundaries` · `keys_at_u64_extremes` | 양끝 포함, `lo > hi`, `lo == hi`, 키 밖 범위, `u64::MAX` 키 |
+| `sequential_and_reverse_insertion` | m = 2~6, 500개 정순·역순 → 높이 ≥ 3, 결과 일치 |
+| 그 밖 | 빈 트리, `new(1)` panic, m = 2, `dyn Index` 경유 |
+
+### 11-4. proptest 2개 — 무작위로 수백 번 넣고 정답지와 대조 (I1·I4)
+
+```rust
+for &(k, v) in &ops {
+    prop_assert_eq!(t.insert(k, v), map.insert(k, v));   // 반환값까지 BTreeMap과 같아야
+}
+t.check();
+// get · range · range_rev를 무작위 구간으로 BTreeMap과 대조 (dyn Index로도 한 번 더)
+```
+
+- **정답지** = `std::collections::BTreeMap` — 이미 검증된 표준 구현과 결과를 비교한다.
+- `matches_btreemap`: `max_keys` 2~8 · 연산 ≤ 400 · 256회.
+- `structure_holds_after_every_insert`: **삽입할 때마다** `check()` — 분할 직후의 중간 상태도 규칙을 지키는지. (끝에서 한 번만 보면, 중간에 깨졌다가 우연히 맞춰진 상태나 어느 삽입에서 깨졌는지를 놓친다.)
+- 키 전략: 좁은 범위 0~200을 6할로 → 중복·upsert가 자주 일어나게 · 나머지는 `u64::MAX` 근처와 전체 범위.
+- 실패하면 proptest가 실패 입력을 **가장 짧게 줄여서(shrink)** 보여준다.
+
+### 11-5. 테스트가 정말 잡는가
+
+- `cargo test` 15/15 (≈1.1초) · `clippy -D warnings` · `fmt --check` 통과.
+- **맛보기 변이**: `find_leaf`의 `sep <= key`를 `sep < key`로 틀리게 → 테스트 4개 실패(검출).
+- `check()` 자체도 일부러 망가뜨린 트리 4종(prev 끊기·구분자 −1·고아 노드·키가 모자란 리프)으로 모두 잡는 것을 확인.
+- 정식 변이 점검 2건은 diff 10.
+
+---
+
+## 12. 진행표
 
 | diff | 내용 | 상태 |
 |---|---|---|
@@ -319,6 +401,6 @@ impl super::Index for BTree {
 | 03 | `insert` · 리프 분할 · 링크 · 루트 분할 (+03b clippy·fmt) | ✅ |
 | 04 | 내부 노드 분할 (push-up) | ✅ |
 | 05 | `range` · `range_rev` · `impl Index for BTree` | ✅ |
-| 06 | 테스트: 단위 + proptest(BTreeMap 비교) + 구조 검사 | ⏳ |
+| 06 | 테스트: 단위 + proptest(BTreeMap 비교) + 구조 검사 | ✅ (이해 게이트 대기) |
 | 07~09 | Extendible Hash | ⏳ |
 | 10 | 변이 테스트 · 마무리 | ⏳ |

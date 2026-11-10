@@ -28,8 +28,11 @@
 | 2026-11-09 | diff 05 → cargo test exit 0 · clippy -D warnings · fmt --check 통과. scratch 스모크 3/3: max 2·3·4·7 × 키 1500개에서 경계점 13×13 조합 + 무작위 800구간(lo>hi 포함) + [0,MAX]·[MAX,MAX] 모두 BTreeMap::range와 일치(range·range_rev, dyn Index 경유), 빈 트리·키 1개, 그림 예 range(25,65)=[30,40,50,60] | 05 게이트 대기 |
 | 2026-11-09 | diff 05 게이트 1차 — 판정 워커(Opus) | fail 1/2: 시작점(lo·hi)만 충족, next/prev 링크·정지 조건(k>hi / k<lo, hi 포함)·내부 노드 1회·C.prev 누락 시 빠지는 키(A')와 이유 누락 → 정답 비노출 재질문. 사이드 질문(역순 필요성)은 ORDER BY DESC LIMIT·T7/T13 근거로 답변, iterator화는 NEXT 후보 |
 | 2026-11-10 | diff 05 게이트 2차 — 사용자 요청으로 ①~④를 하나씩 질의(코드만 제시, 정답 비노출) → 합쳐서 판정 워커(Opus) | PASS 2/2 (사소한 생략: 체인 끝 정지). 사이드 질문 "C.prev가 왜 꼭 필요한가" — 각 방향 체인에서 A'로 들어가는 길이 하나뿐(I2) 답변 |
-| 2026-11-10 | 사용자 요청: main에 ff 병합(b8887da, diff 04·05 포함) → test·clippy·fmt 재확인 → main push → 브랜치 feat/stage1-btree-tests. diff 06 테스트 설계는 블라인드 워커(Opus — spec·trait·타입 정의만, 알고리즘 본문 미열람)에 위임 | 06 설계 대기 |
+| 2026-11-10 | 사용자 요청: main에 ff 병합(b8887da, diff 04·05 포함) → test·clippy·fmt 재확인 → main push → 브랜치 feat/stage1-btree-tests. diff 06 테스트 설계는 블라인드 워커(Opus — spec·trait·타입 정의만, 알고리즘 본문 미열람)에 위임 | 06 설계 회수 |
 | 2026-11-10 | 사용자 요청: diff 05 설명(range/range_rev 동작·비교표, 내부 노드 1회 하강, 역순 필요성, C.prev 필요성, impl Index)을 btree.md §10으로 문서화 | 문서 커밋 |
+| 2026-11-10 | diff 06 블라인드 설계 회수(Opus, 토큰 86.6k) — check()+단위 13+proptest 2, 워커 사본에서 15/15·clippy·fmt 통과, check() 자체를 손상 4종(prev 끊기·구분자 -1·고아·과소 리프)으로 검증. **명세 편차 발견**: 내 브리프가 check를 테스트 전용으로 지시 ↔ 명세 T12 = depth·check 공개 → T12대로 `pub fn depth`·`pub fn check`(+private leaf/Walk/walk)로 재배치, 테스트 로직 무변경. 스크래치 사본 15/15·clippy -D warnings·fmt·비테스트 빌드 경고 0 | 06 코드 적용 |
+| 2026-11-10 | diff 06 적용(스크래치 검증본과 바이트 동일) → cargo test 15/15(≈1.1s) · clippy -D warnings · fmt --check 통과. 맛보기 변이(스크래치 사본, find_leaf `sep <= key`→`sep < key`): 4개 테스트 실패로 검출(range_boundaries·upsert_after_splits·dyn_index·proptest matches_btreemap) — 정식 변이 2건은 diff 10 | 06 게이트 대기 |
+| 2026-11-10 | 사용자 요청: diff 06 설명(블라인드 설계·check 검사 항목·범위 물려받기·하한 출처·단위/proptest 표·변이 맛보기)을 btree.md §11로 문서화 | 문서 커밋 |
 
 ## diff 기록 (before/after — 판정 워커 그라운드 트루스)
 
@@ -471,5 +474,38 @@ impl super::Index for BTree {
     fn range_rev(&self, lo: u64, hi: u64) -> Vec<(u64, u64)> {
         BTree::range_rev(self, lo, hi)
     }
+}
+```
+
+### diff 06 — B+tree 테스트 + T12 구조 관찰 API
+
+before: `btree.rs`는 `impl super::Index for BTree`로 끝남(테스트 없음, `depth`·`check` 없음).
+
+after — 파일 끝에 추가(전문은 `src/index/btree.rs` 243행~ — 아래는 골격):
+
+```rust
+// ---------- 구조 관찰·검사 (T12: depth·check 공개) ----------
+impl BTree {
+    pub fn depth(&self) -> usize { /* 가장 왼쪽 경로로 내려가며 센 노드 수 */ }
+    pub fn check(&self) {
+        // walk(): 노드 1회 방문(공유·순환·고아 금지) · 키 ≤ max · 엄격 오름차순
+        //         · 구분자 범위 [lo, hi) · 리프 values=keys · 비루트 하한(리프 ⌈m/2⌉, 내부 ⌊m/2⌋)
+        //         · children = keys + 1 · 구분자 = 오른쪽 서브트리 최소 키
+        // 모든 리프 깊이 같음 · 첫 리프 prev None · 끝 리프 next None
+        // a.next = b ⇔ b.prev = a · next 사슬 = 중위 리프 순서(키 엄격 오름차순) · prev 사슬 = 역순
+    }
+}
+fn leaf(..) / struct Walk / fn walk(..)        // check 보조(private)
+
+#[cfg(test)]
+mod tests {
+    // 단위 13: new_tree_is_empty · new_with_max_keys_1_panics · min_max_keys_2_works
+    //   · upsert_returns_old_value_and_replaces · upsert_into_full_leaf_does_not_split
+    //   · upsert_after_splits_keeps_structure · no_split_until_overflow
+    //   · first_leaf_split_copies_up_separator · internal_split_pushes_up_middle_and_grows_root
+    //   · sequential_and_reverse_insertion · range_boundaries · keys_at_u64_extremes · works_through_dyn_index
+    // proptest 2 (256 cases): matches_btreemap(max 2..=8, ops ≤400, 질의 ≤32 — get·range·range_rev·dyn Index vs BTreeMap)
+    //   · structure_holds_after_every_insert(max 2..=5, ops ≤120 — 삽입마다 check)
+    // 키 전략: 0..200 (6) · u64::MAX 근처 (1) · 전체 u64 (1)
 }
 ```
