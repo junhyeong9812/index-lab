@@ -42,6 +42,9 @@
 | 2026-11-11 | diff 07b 설계: mod.rs에 `pub mod hash;` 1줄 | 07b 적용 |
 | 2026-11-11 | 07b 적용(첫 Edit은 미Read로 거부 → Read 후 재적용) → cargo test 15/15 · clippy -D warnings(expect 충족) · fmt 통과. 사용자 질문 "섞이면 디렉터리가 어떻게 생기나" → 8·16·24 실계산(키 그대로 d=4까지 16칸 vs mix d=1 2칸) 답변. 게이트 1차 "그 한 줄은 로컬 라이브러리였을 것" → Opus 판정 FAIL(모듈 트리 미연결 → 미컴파일 인과 없음) | 1/2 실패 · 재질문 |
 | 2026-11-11 | 사용자 요청: 게이트 답을 판정 전에 메인이 먼저 확인·힌트로 고쳐 가기(사전 점검 라운드는 x/2 미소모) — 메모리 저장. 07b 2차(사전 점검 거침): "pub 없으면 컴파일 안 됨, 임포트가 없어서"(pub 혼동 → 정정) · "외부에서 못 읽어서 없다고 나옴"(pub=공개) · "컴파일이 애초에 안 돼서" → Opus 판정 PASS(근소 — Q1 파일 목록 본인 미기재) → gate-pass · 코드 커밋 3f80cc1 | 07 완료 |
+| 2026-11-11 | 문서 커밋 4883d5c(hash.md). diff 08 설계: insert(upsert → push → 넘치면 split 반복) · split(지역=전역이면 디렉터리 extend_from_within 두 배 → d번째 비트로 재배치 → 디렉터리 칸 재지정, 전체 훑기 ponytail) · dead_code expect 2개 제거. 스크래치: 첫 시도 E0502(self.slot 빌림) → id 먼저 계산으로 수정. 스모크(release): cap 1..4 × seed 30 × 300 삽입 — insert 반환·get이 BTreeMap과 일치, 삽입마다 I3 검사 통과, 최대 전역 깊이 15(cap 1). 8·16·24 cap2 → 전역 1 dir [0,1](hash.md §3 계산과 일치), 16·32·40 → 전역 4. 첫 스모크는 debug + cap1 + 매 삽입 O(디렉터리×버킷) 검사로 120s 초과 → 중단·경량화. cargo test 15/15·clippy -D warnings·fmt 통과 | 08 적용 |
+| 2026-11-11 | 08 Write(스크래치 검증본과 동일) · test 15/15·clippy·fmt. 게이트 1차(사전 점검 거침, 하나씩): Q1 "B는 디렉터리 2개로 늘고… A는 내부 확장/밀림"(①② 디렉터리 뒤바뀜 → 정정) → "4→8, next·prev에 끼우는 형식"(B+tree 혼동 → 정정) · Q2 "3번째 비트만 다르고 B는 01만 보니 같은 칸" · Q3 "32,40이 몰려 다시 넘치니 반복"(근거 사례 부정확) → Opus 판정 FAIL(Q1 약함·Q2 일반화 누락·Q3 재조회 누락) | 1/2 실패 · 재질문 |
+| 2026-11-11 | 사용자 요청: 08 설명 문서화 → hash.md §4-1(insert·split 코드·두 경우·복사 이유·next/prev 없음·16/32/40 loop 따라가기 표, 실행 출력과 대조) + §6 08 1차 오답 노트 · 사용자 질문("디렉터리 링크 때문에 문제?") 답 기록 | 문서 |
 
 ## diff 기록 (before/after — 판정 워커 그라운드 트루스)
 
@@ -566,4 +569,44 @@ impl Hash {
 ```diff
  pub mod btree;
 +pub mod hash;
+```
+
+### diff 08 — Hash `insert` · `split` (지역 < 전역 분할 · 지역 = 전역 디렉터리 두 배)
+
+before: `Bucket.local_depth`·`Hash.bucket_cap`에 `#[expect(dead_code, …)]`, `insert` 없음.
+
+after:
+```rust
+pub fn insert(&mut self, key: u64, value: u64) -> Option<u64> {
+    let id = self.directory[self.slot(key)];
+    let b = &mut self.buckets[id];
+    if let Some(i) = b.keys.iter().position(|&k| k == key) {
+        return Some(std::mem::replace(&mut b.values[i], value));
+    }
+    b.keys.push(key);
+    b.values.push(value);
+    loop {
+        let id = self.directory[self.slot(key)];
+        if self.buckets[id].keys.len() <= self.bucket_cap {
+            return None;
+        }
+        self.split(id);
+    }
+}
+
+fn split(&mut self, id: BucketId) {
+    let d = self.buckets[id].local_depth;
+    if d == self.global_depth {
+        self.directory.extend_from_within(..);   // 두 배: 뒤 절반 = 앞 절반 복사
+        self.global_depth += 1;
+    }
+    let bit = 1u64 << d;
+    // 키를 꺼내 새 비트 0 → stay, 1 → moved (둘 다 local_depth d+1)
+    // buckets[id] = stay · buckets.push(moved)
+    for (slot, b) in self.directory.iter_mut().enumerate() {
+        if *b == id && slot as u64 & bit != 0 {
+            *b = new_id;                           // 새 비트가 1인 칸 → 새 버킷
+        }
+    }
+}
 ```
