@@ -120,9 +120,47 @@ impl Hash {
         }
     }
 
+    /// `lo <= key <= hi`를 오름차순으로. 해시는 키 순서를 모르므로 모든 버킷을 훑어 거른 뒤 정렬한다(T10).
+    /// `lo > hi`면 거르는 조건을 만족하는 키가 없어 빈 결과가 된다.
+    pub fn range(&self, lo: u64, hi: u64) -> Vec<(u64, u64)> {
+        let mut out: Vec<(u64, u64)> = self
+            .buckets
+            .iter()
+            .flat_map(|b| b.keys.iter().copied().zip(b.values.iter().copied()))
+            .filter(|&(k, _)| lo <= k && k <= hi)
+            .collect();
+        out.sort_unstable_by_key(|&(k, _)| k); // 키는 중복이 없으니 불안정 정렬로 충분
+        out
+    }
+
+    /// `range`와 같은 범위를 내림차순으로 — 같은 전체 훑기 후 뒤집는다(T13).
+    pub fn range_rev(&self, lo: u64, hi: u64) -> Vec<(u64, u64)> {
+        let mut out = self.range(lo, hi);
+        out.reverse();
+        out
+    }
+
     /// 해시의 하위 `global_depth` 비트 = 디렉터리 칸 번호.
     fn slot(&self, key: u64) -> usize {
         let mask = (1u64 << self.global_depth) - 1;
         (mix(key) & mask) as usize
+    }
+}
+
+impl super::Index for Hash {
+    fn insert(&mut self, key: u64, value: u64) -> Option<u64> {
+        Hash::insert(self, key, value)
+    }
+
+    fn get(&self, key: u64) -> Option<u64> {
+        Hash::get(self, key)
+    }
+
+    fn range(&self, lo: u64, hi: u64) -> Vec<(u64, u64)> {
+        Hash::range(self, lo, hi)
+    }
+
+    fn range_rev(&self, lo: u64, hi: u64) -> Vec<(u64, u64)> {
+        Hash::range_rev(self, lo, hi)
     }
 }
