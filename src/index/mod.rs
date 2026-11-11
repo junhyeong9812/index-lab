@@ -3,6 +3,7 @@
 //! 키는 `u64`, 값은 `u64` 고정(README 범위: 키 `u64`, 값 고정 길이).
 
 pub mod btree;
+pub mod hash;
 
 /// 키 → 값 인덱스.
 ///
