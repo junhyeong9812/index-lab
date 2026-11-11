@@ -404,3 +404,5 @@ t.check();
 | 06 | 테스트: 단위 + proptest(BTreeMap 비교) + 구조 검사 | ✅ |
 | 07~09 | Extendible Hash | ⏳ |
 | 10 | 변이 테스트 · 마무리 | ⏳ |
+
+> 해시 인덱스 문서: [hash.md](hash.md)

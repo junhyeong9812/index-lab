@@ -36,6 +36,12 @@
 | 2026-11-10 | 06 게이트 1차 답변 "check는 위에서 lo hi 범위 물려받아서 확인하고 proptest는 BTreeMap이랑 비교" → Opus 판정 FAIL(①부분: 자식별 좁혀지는 경계 누락 ②부분: 비교 대상 누락 ③누락: 삽입마다 check 이유) | 1/2 실패 · 재질문 |
 | 2026-11-11 | 06 게이트 2차(사용자 선택: 하나씩) — ①자식 범위 c0[P_lo,30)·c1[30,70)·c2[70,P_hi) 스스로 도달 ②비교 대상 일부만(insert 반환값·get·range_rev·dyn 경유는 정정 받음) ③"삽입 시 확인해 깨짐 방지"(시점만, 놓치는 상황·실패 위치 특정 누락, "방지"는 오개념 → 검출) → Opus 판정 FAIL | 2/2 실패 → 정답 설명 후 통과 |
 | 2026-11-11 | gate-pass → cargo test 15/15 재확인 → 코드 커밋 bba4e0a | 06 완료 |
+| 2026-11-11 | main ff 병합(0d9d87a) · push → 브랜치 feat/stage1-hash-index. diff 07a 설계: hash.rs(구조체·mix·new·get·slot) — 스크래치 검증 cargo test 15/15·clippy -D warnings·fmt 통과, 스모크(get None/Some · mix 0..100000 충돌 0, mix(0)=0 고정점) | 07a 적용 대기 |
+| 2026-11-11 | 07a Write(스크래치 검증본과 동일) · 게이트 1차 답변 "칸으로 먼저 확인하고 버킷번호로 탐색 … 믹스를 통해 균일하게 … 깊이 2이면 2의 2배 4개 칸 … 끝자리가 1인지 보기에 … 버킷 3개" → Opus 판정 FAIL(①mix→하위 비트→칸 연결 누락 ②원리 맞음·일반식/‘2의 2배’ 판별 불가 ③‘균일’ 일반론, 8의 배수 실패·전단사 누락) | 1/2 실패 · 재질문 |
+| 2026-11-11 | 07a 게이트 2차(하나씩) — "mix로 1을 빼서"(mix↔mask −1 혼동 → 정정) · mask 0b0111 · 8칸 직접 셈 · 8의 배수 → 디렉터리만 커지고 겹침 직접 추론 · "mix로 균등" → Opus 판정 PASS(근소 — 전단사·칸 공유 조건 미언급은 오답노트로) | 07a 통과 |
+| 2026-11-11 | diff 07b 설계: mod.rs에 `pub mod hash;` 1줄 | 07b 적용 |
+| 2026-11-11 | 07b 적용(첫 Edit은 미Read로 거부 → Read 후 재적용) → cargo test 15/15 · clippy -D warnings(expect 충족) · fmt 통과. 사용자 질문 "섞이면 디렉터리가 어떻게 생기나" → 8·16·24 실계산(키 그대로 d=4까지 16칸 vs mix d=1 2칸) 답변. 게이트 1차 "그 한 줄은 로컬 라이브러리였을 것" → Opus 판정 FAIL(모듈 트리 미연결 → 미컴파일 인과 없음) | 1/2 실패 · 재질문 |
+| 2026-11-11 | 사용자 요청: 게이트 답을 판정 전에 메인이 먼저 확인·힌트로 고쳐 가기(사전 점검 라운드는 x/2 미소모) — 메모리 저장. 07b 2차(사전 점검 거침): "pub 없으면 컴파일 안 됨, 임포트가 없어서"(pub 혼동 → 정정) · "외부에서 못 읽어서 없다고 나옴"(pub=공개) · "컴파일이 애초에 안 돼서" → Opus 판정 PASS(근소 — Q1 파일 목록 본인 미기재) → gate-pass · 코드 커밋 3f80cc1 | 07 완료 |
 
 ## diff 기록 (before/after — 판정 워커 그라운드 트루스)
 
@@ -511,4 +517,53 @@ mod tests {
     //   · structure_holds_after_every_insert(max 2..=5, ops ≤120 — 삽입마다 check)
     // 키 전략: 0..200 (6) · u64::MAX 근처 (1) · 전체 u64 (1)
 }
+```
+
+### diff 07a — `src/index/hash.rs` 디렉터리·버킷 구조체 + 해시 함수 + `get` (before: 없음)
+
+mod 선언(`pub mod hash;`)은 07b(쓰기 1회 = 게이트 1회, 02a/02b와 같은 방식).
+
+```rust
+pub type BucketId = usize;
+
+struct Bucket {
+    #[expect(dead_code, reason = "diff 08 분할에서 읽는다")]
+    local_depth: u32,          // 이 버킷이 구분에 쓰는 하위 비트 수(≤ 전역 깊이, I3)
+    keys: Vec<u64>,            // 순서 없음
+    values: Vec<u64>,
+}
+
+pub struct Hash {
+    directory: Vec<BucketId>,  // 길이 = 2^global_depth
+    buckets: Vec<Bucket>,
+    global_depth: u32,
+    #[expect(dead_code, reason = "diff 08 넘침 판정에서 읽는다")]
+    bucket_cap: usize,
+}
+
+fn mix(key: u64) -> u64 {     // splitmix64 마무리 — 전단사(T8)
+    let mut z = key;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+impl Hash {
+    pub fn new(bucket_cap: usize) -> Self   // 전역 깊이 0 · 디렉터리 [0] · 빈 버킷 1개
+    pub fn get(&self, key: u64) -> Option<u64> {
+        let b = &self.buckets[self.directory[self.slot(key)]];
+        b.keys.iter().position(|&k| k == key).map(|i| b.values[i])
+    }
+    fn slot(&self, key: u64) -> usize {      // 해시 하위 global_depth 비트
+        let mask = (1u64 << self.global_depth) - 1;
+        (mix(key) & mask) as usize
+    }
+}
+```
+
+### diff 07b — `src/index/mod.rs` 모듈 선언
+
+```diff
+ pub mod btree;
++pub mod hash;
 ```
