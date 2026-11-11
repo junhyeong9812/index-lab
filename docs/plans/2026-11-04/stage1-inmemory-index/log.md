@@ -33,6 +33,9 @@
 | 2026-11-10 | diff 06 블라인드 설계 회수(Opus, 토큰 86.6k) — check()+단위 13+proptest 2, 워커 사본에서 15/15·clippy·fmt 통과, check() 자체를 손상 4종(prev 끊기·구분자 -1·고아·과소 리프)으로 검증. **명세 편차 발견**: 내 브리프가 check를 테스트 전용으로 지시 ↔ 명세 T12 = depth·check 공개 → T12대로 `pub fn depth`·`pub fn check`(+private leaf/Walk/walk)로 재배치, 테스트 로직 무변경. 스크래치 사본 15/15·clippy -D warnings·fmt·비테스트 빌드 경고 0 | 06 코드 적용 |
 | 2026-11-10 | diff 06 적용(스크래치 검증본과 바이트 동일) → cargo test 15/15(≈1.1s) · clippy -D warnings · fmt --check 통과. 맛보기 변이(스크래치 사본, find_leaf `sep <= key`→`sep < key`): 4개 테스트 실패로 검출(range_boundaries·upsert_after_splits·dyn_index·proptest matches_btreemap) — 정식 변이 2건은 diff 10 | 06 게이트 대기 |
 | 2026-11-10 | 사용자 요청: diff 06 설명(블라인드 설계·check 검사 항목·범위 물려받기·하한 출처·단위/proptest 표·변이 맛보기)을 btree.md §11로 문서화 | 문서 커밋 |
+| 2026-11-10 | 06 게이트 1차 답변 "check는 위에서 lo hi 범위 물려받아서 확인하고 proptest는 BTreeMap이랑 비교" → Opus 판정 FAIL(①부분: 자식별 좁혀지는 경계 누락 ②부분: 비교 대상 누락 ③누락: 삽입마다 check 이유) | 1/2 실패 · 재질문 |
+| 2026-11-11 | 06 게이트 2차(사용자 선택: 하나씩) — ①자식 범위 c0[P_lo,30)·c1[30,70)·c2[70,P_hi) 스스로 도달 ②비교 대상 일부만(insert 반환값·get·range_rev·dyn 경유는 정정 받음) ③"삽입 시 확인해 깨짐 방지"(시점만, 놓치는 상황·실패 위치 특정 누락, "방지"는 오개념 → 검출) → Opus 판정 FAIL | 2/2 실패 → 정답 설명 후 통과 |
+| 2026-11-11 | gate-pass → cargo test 15/15 재확인 → 코드 커밋 bba4e0a | 06 완료 |
 
 ## diff 기록 (before/after — 판정 워커 그라운드 트루스)
 

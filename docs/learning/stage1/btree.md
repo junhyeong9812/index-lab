@@ -401,6 +401,6 @@ t.check();
 | 03 | `insert` · 리프 분할 · 링크 · 루트 분할 (+03b clippy·fmt) | ✅ |
 | 04 | 내부 노드 분할 (push-up) | ✅ |
 | 05 | `range` · `range_rev` · `impl Index for BTree` | ✅ |
-| 06 | 테스트: 단위 + proptest(BTreeMap 비교) + 구조 검사 | ✅ (이해 게이트 대기) |
+| 06 | 테스트: 단위 + proptest(BTreeMap 비교) + 구조 검사 | ✅ |
 | 07~09 | Extendible Hash | ⏳ |
 | 10 | 변이 테스트 · 마무리 | ⏳ |
