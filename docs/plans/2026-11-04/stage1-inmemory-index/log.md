@@ -47,6 +47,8 @@
 | 2026-11-11 | 사용자 요청: 08 설명 문서화 → hash.md §4-1(insert·split 코드·두 경우·복사 이유·next/prev 없음·16/32/40 loop 따라가기 표, 실행 출력과 대조) + §6 08 1차 오답 노트 · 사용자 질문("디렉터리 링크 때문에 문제?") 답 기록 | 문서 |
 | 2026-11-11 | 08 게이트 2차(사전 점검·하나씩, 재질문 P/Q/R·X 예시): (a) 첫 답 "복사되며 확장" ✗ → 코드 따라가기로 d=1·조건 거짓·확장 없음 ✅, bit=0b1 ✗(0b10), 11→R' ✅ · (b) 첫 답 전부 ✗(거짓·4칸·R'·재해싱·2^n 이동) → 참·8칸·복사 매핑·000/100→P ✅, "지역 깊이 3이 된다" ✗, 이동 0개 ✅(힌트 뒤) · (c) 셋 다 X'·0 남고 1 이동 일반화·key로 X' 재조회 ✅ → Opus 판정 FAIL(c만 독립 충족) | 2/2 실패 → 정답 설명 후 통과 |
 | 2026-11-11 | gate-pass → test 15/15 → 코드 커밋 98a6e82 | 08 완료 |
+| 2026-11-11 | 문서 커밋 f80fc92. diff 09를 09a(range·range_rev·impl Index — 메인 구현)와 09b(global_depth·bucket_count·check 공개 + 테스트 — 블라인드 워커, B+tree 05/06과 같은 분리)로 나눔. 09a 스크래치: 전체 버킷 훑기→필터→sort_unstable, rev=뒤집기; 스모크(release) cap 1..4 × seed 30 × 200 삽입 × 범위 6종(lo>hi·한 점·u64::MAX 포함) BTreeMap·dyn Index 일치; test 15/15·clippy·fmt 통과 | 09a 적용 |
+| 2026-11-11 | 09a 게이트(사전 점검·하나씩): Q1 "옆 칸에 없고 연결도 없으니 전부 훑음" ✅ · Q2 첫 답 "난수값이라 역정규화 후 정렬" ✗(원래 키 저장) → "원래 키로 정렬" · "버킷은 분할 때 번호, 키는 넣은 순서라 오름차순 아님" ✅ · Q3 "이미 정렬 → 뒤집으면 내림차순, 어차피 전체 훑기" ✅ → Opus 판정 PASS(남은 틈: trait 오름차순 요구 명시 X, mix/원키 혼동 재확인) → gate-pass → test 15/15·clippy·fmt → 코드 커밋 d40fe20 · hash.md §4-2·§5·§6 09a 갱신 | 09a 완료 |
 
 ## diff 기록 (before/after — 판정 워커 그라운드 트루스)
 
@@ -611,4 +613,30 @@ fn split(&mut self, id: BucketId) {
         }
     }
 }
+```
+
+### diff 09a — Hash `range`·`range_rev` · `impl Index for Hash`
+
+before: `slot`으로 `impl Hash` 끝, trait 구현 없음.
+
+after (`slot` 앞에 추가 + 파일 끝에 trait 구현):
+```rust
+pub fn range(&self, lo: u64, hi: u64) -> Vec<(u64, u64)> {
+    let mut out: Vec<(u64, u64)> = self
+        .buckets
+        .iter()
+        .flat_map(|b| b.keys.iter().copied().zip(b.values.iter().copied()))
+        .filter(|&(k, _)| lo <= k && k <= hi)
+        .collect();
+    out.sort_unstable_by_key(|&(k, _)| k); // 키는 중복이 없으니 불안정 정렬로 충분
+    out
+}
+
+pub fn range_rev(&self, lo: u64, hi: u64) -> Vec<(u64, u64)> {
+    let mut out = self.range(lo, hi);
+    out.reverse();
+    out
+}
+
+impl super::Index for Hash { /* insert·get·range·range_rev → Hash::… 위임 (BTree와 같은 형태) */ }
 ```
