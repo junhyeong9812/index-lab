@@ -3,5 +3,9 @@ name = "index-lab"
 version = "0.1.0"
 edition = "2024"
 
+[dependencies]
+bytemuck = { version = "1.25.2", features = ["derive", "min_const_generics"] }
+
 [dev-dependencies]
 proptest = "1.12.0"
+tempfile = "3.27.0"
