@@ -645,3 +645,133 @@ pub fn range_rev(&self, lo: u64, hi: u64) -> Vec<(u64, u64)> {
 
 impl super::Index for Hash { /* insert·get·range·range_rev → Hash::… 위임 (BTree와 같은 형태) */ }
 ```
+
+## 완료 요약
+
+> 기준: `feat/stage1-hash-index` HEAD `b762795` (B+tree 부분은 main `0d9d87a`까지 병합됨). 스니펫은 HEAD 실파일에서 복사.
+
+### 1. 목표 대비 결과
+
+목표(§1): `Index` trait 뒤에 메모리 내 B+tree·Extendible Hash를 구현하고, 둘 다 `BTreeMap` 정답지 속성 테스트를 통과시킨다 → **달성** (test 38/38, 런타임 의존성 0, dev-dep `proptest = "1.12.0"`만).
+
+| 불변식 | 강제 위치 | 상태 |
+|---|---|---|
+| I1 정답 일치(get·range·range_rev, 두 구현) | proptest `matches_btreemap` — btree.rs:794(대조 802~827, `dyn Index` 경유 825~827) · hash.rs:713(721~746) | 충족 |
+| I2 B+tree 구조 | `check()` btree.rs:258~346 + `walk()` 370~464 (리프 깊이 동일·키 엄격 오름차순·구분자 범위 `[lo,hi)`·구분자 = 오른쪽 서브트리 최소 키·하한 리프 ⌈m/2⌉/내부 ⌊m/2⌋·next/prev 사슬·`a.next=b ⇔ b.prev=a`·고아 없음). 매 삽입 검사: `structure_holds_after_every_insert` btree.rs:833(check 841) | 충족 |
+| I3 Hash 구조 | `check()` hash.rs:193~265 (디렉터리 길이 = 2^g·d ≤ g·가리키는 칸 수 = 2^(g−d)·칸 접미사 동일·키의 `mix` 하위 d비트 = 접미사·용량·중복·고아 버킷). 매 삽입 검사: `structure_holds_after_every_insert` hash.rs:753(check 763) · 손상 검출 테스트 10종 hash.rs:556~669 | 충족 |
+| I4 upsert | btree.rs:76 (`Ok(i) => return (Some(mem::replace(..)), None)`) · hash.rs:60~61 · 테스트 btree.rs:537·549·563, hash.rs:352·365, proptest의 `insert` 반환값 대조 | 충족 |
+
+### 2. diff 01–10
+
+| diff | 내용 | 코드 커밋 | 게이트 (log) |
+|---|---|---|---|
+| 01a/b/c | 크레이트·`Index` trait · lib.rs 연결 · dev-dep proptest(A1 실증) | 690e579 | 01a fail 2/2 → 지적 후 통과 · 01b 1/2 pass · 01c 1/2 pass |
+| 02a/b | 노드 구조체 + `get` · `pub mod btree` | 8f5a085(03과 함께) | 02a 1/2 fail → 2/2 pass · 02b 1/2 pass |
+| 03/03b | `insert`·`split_leaf`(copy-up)·형제 링크·루트 분할(04에서 당김) · lint/fmt 정리 | 8f5a085 | 03 fail 2/2 → 설명 후 통과 · 03b 1/2 pass |
+| 04 | `split_internal`(push-up) | 211c065 | fail 2/2 → 설명 후 통과 |
+| 05 | `range`·`range_rev`·`impl Index for BTree` | 9bd4d7f | 1/2 fail → 2/2 pass |
+| 06 | `depth`·`check` 공개 + 단위 13·proptest 2 (블라인드 워커 설계) | bba4e0a | fail 2/2 → 설명 후 통과 |
+| 07a/b | Hash 구조·`mix`(splitmix64)·`get` · `pub mod hash` | 3f80cc1 | 07a 1/2 fail → 2/2 pass · 07b 1/2 fail → 2/2 pass |
+| 08 | Hash `insert`·`split`(두 배·칸 재지정·반복 분할) | 98a6e82 | fail 2/2 → 설명 후 통과 |
+| 09a | Hash `range`·`range_rev`·`impl Index for Hash` | d40fe20 | 1/2 pass |
+| 09b | `global_depth`·`bucket_count`·`check` 공개 + 단위 11·손상 10·proptest 2 (블라인드 워커) | 9d9f99e | 1/2 pass (경계선) |
+| 10 | 변이 점검 4종 + clippy·fmt | 없음(코드 변경 0, docs b762795) | pass |
+
+### 3. 핵심 before/after
+
+(a) `Index` trait — before: 없음(신규 파일) · after `src/index/mod.rs:11-26`
+```rust
+pub trait Index {
+    fn insert(&mut self, key: u64, value: u64) -> Option<u64>;
+    fn get(&self, key: u64) -> Option<u64>;
+    fn range(&self, lo: u64, hi: u64) -> Vec<(u64, u64)>;
+    fn range_rev(&self, lo: u64, hi: u64) -> Vec<(u64, u64)>;
+}
+
+// 3단계 러너가 `Box<dyn Index>`로 구현을 바꿔 끼운다 — trait가 dyn으로 못 쓰이게 바뀌면 여기서 컴파일이 깨진다.
+const _: Option<&dyn Index> = None;
+```
+(문서 주석 줄은 생략, 시그니처·const는 원문 그대로)
+
+(b) B+tree 구분자 규칙·copy-up — before: 없음(신규 파일) · after `src/index/btree.rs:163-165`, `137-141`
+```rust
+                    // key 이하인 구분자 개수 = 내려갈 자식 칸 (key == 구분자면 오른쪽으로)
+                    let i = keys.partition_point(|&sep| sep <= key);
+                    id = children[i];
+```
+```rust
+        let mid = keys.len() / 2;
+        let right_keys = keys.split_off(mid);
+        let right_values = values.split_off(mid);
+        let sep = right_keys[0];
+        let old_next = next.replace(new_id); // A.next = A'
+```
+
+(c) Hash 분할: 디렉터리 두 배 + 칸 재지정 — before: 없음(08에서 신규 함수) · after `src/index/hash.rs:79-84`, `114-120`
+```rust
+        if d == self.global_depth {
+            // 이 버킷이 이미 디렉터리의 모든 비트를 쓰고 있다 → 디렉터리를 두 배로.
+            // 뒤쪽 절반 = 앞쪽 복사: 칸 i와 칸 i + 2^전역은 새 비트만 다르니 같은 버킷을 가리킨다.
+            self.directory.extend_from_within(..);
+            self.global_depth += 1;
+        }
+```
+```rust
+        // 이 버킷을 가리키던 2^(전역−d)칸 중 새 비트가 1인 절반을 새 버킷으로 다시 가리킨다.
+        // ponytail: 디렉터리 전체를 훑는다(O(2^전역)). 칸만 골라 도는 방식은 분할 비용 측정 때 검토.
+        for (slot, b) in self.directory.iter_mut().enumerate() {
+            if *b == id && slot as u64 & bit != 0 {
+                *b = new_id;
+            }
+        }
+```
+
+(d) Hash range: 전체 훑기 + 정렬 — before: 없음(09a 신규) · after `src/index/hash.rs:125-134`
+```rust
+    pub fn range(&self, lo: u64, hi: u64) -> Vec<(u64, u64)> {
+        let mut out: Vec<(u64, u64)> = self
+            .buckets
+            .iter()
+            .flat_map(|b| b.keys.iter().copied().zip(b.values.iter().copied()))
+            .filter(|&(k, _)| lo <= k && k <= hi)
+            .collect();
+        out.sort_unstable_by_key(|&(k, _)| k); // 키는 중복이 없으니 불안정 정렬로 충분
+        out
+    }
+```
+
+### 4. 검증 (2026-11-12, HEAD b762795에서 실행)
+
+- `cargo test -q` → `test result: ok. 38 passed; 0 failed` (btree 15 + hash 23; doc-test 0개)
+- `cargo clippy --all-targets -- -D warnings` → exit 0, 경고 없음
+- `cargo fmt --check` → exit 0
+- 변이 점검(log "10 변이", 스크래치 사본 — 레포 무변경, 변이마다 원복·baseline 38/38 재확인) — **4종 모두 검출**:
+  - B1 `split_leaf` 구분자 = 왼쪽 마지막 키 → 10개 실패
+  - B2 `find_leaf` `sep <= key` → `sep < key` → 4개 실패
+  - H1 칸 재지정 `bit != 0` → `== 0` → 15개 실패
+  - H2 칸 재지정 생략 → 단위 6 + proptest 2 실패(hash.rs:226 칸 수 검사, 축소 ~110s)
+
+### 5. 알려진 한계·ponytail
+
+- **Hash 분할 칸 재지정이 디렉터리 전체 훑기**(O(2^전역)) — hash.rs:115 `ponytail:` 주석. 업그레이드 경로: 해당 버킷의 칸만 골라 돌기(분할 비용 측정 때 검토).
+- **range는 `Vec` 반환(T1)** — 조기 중단 없음(LIMIT 류 질의도 범위 전체를 모은다). iterator화는 NEXT 후보(log 05 게이트 행).
+- **Hash range는 항상 O(n) 전체 훑기 + O(k log k) 정렬**, `range_rev`는 그 결과를 뒤집음(T10·T13 — 3단계에서 "해시는 범위에 약하다"를 측정할 의도된 선택).
+- **삭제 없음(T4)** — 병합·재분배·버킷 합치기 미구현. Hash `check()`의 "고아 버킷 = 위반"도 삭제 없음을 전제로 함(hash.rs:190~191).
+- **Hash 최대 깊이 가드 없음** — 명세 §9 리서치는 "해시 함수 선택과 최대 깊이 가드가 필요"라 적었으나, 코드는 T8 전단사 `mix`만으로 대응하고 `insert`/`split`(hash.rs:57~121)에 깊이 상한 검사는 없다. `check()`에 `g < usize::BITS` assert(hash.rs:195~198)만 있다(검사 전용, 삽입 경로 아님). 서로 다른 키는 해시가 달라 분할은 언젠가 갈라지지만, 하위 비트를 길게 공유하는 키들이면 디렉터리가 2^g로 커지는 것을 막는 장치는 없다.
+
+### 6. 학습 메모
+
+- **반복된 틈: 버킷에 저장되는 것은 원래 키, `mix(key)`는 칸(slot) 결정에만 쓰인다.** 09a(Q2 첫 답 "역정규화 후 정렬")·09b(Q1(b) "mix키")·10(Q0 힌트 없이 "mix로 바이트화한 값 저장") — **세 번 연속 처음 물음에서 실패**, 매번 힌트/실출력 후에야 교정. 10 판정: 변이 이해 한정 PASS, 이 구분은 여전히 틈.
+- 조치: **2단계 첫 게이트에서 힌트 없이 이 1문을 선행**한다(예: "버킷 안 `keys`에 든 값은 무엇이고, `mix`는 어디서 쓰이나?").
+- 그 밖에 fail 2/2 → 설명 후 통과가 03·04·06·08 (분할·검사의 "왜" 설명 누락이 공통) — 오답 노트는 docs/learning/stage1/btree-qa.md·hash.md §6.
+
+## 아카이브
+
+- 범위: 사용자 선택(2026-11-12) — 카드 4건(E0502 빌림 평가 순서 · 속성 테스트 비용 · 항등 해시 디렉터리 폭증 · dyn 호환성 가드). 초안 Opus 워커(토큰 158.5k), 메인 전문 검토.
+- 카드에 나오면 안 되는 원 식별자(노출 스캔 입력): `index-lab` · `storage-labs` · `junhyeong9812` · `/home/jun` · `BucketId` · `BTree` · `hash.rs` · `btree.rs` · `mod.rs` · `global_depth` · `bucket_count` · `structure_holds_after_every_insert` · `matches_btreemap` · `feat/stage1` · `Index for` · `trait Index`
+- 노출 스캔: 카드 커밋마다 `git diff --cached` 추가 행을 위 원 식별자 + 시크릿·IP 패턴으로 grep → 4건 모두 0건.
+- 아카이브: `issue/rust/borrow-check-evaluation-order/` ⓐ fa5fab34
+- 아카이브: `issue/rust/dyn-compatibility-guard/` ⓐ 9c293f66
+- 아카이브: `issue/cross-cutting/testing/property-test-cost-budget/` ⓐ e6340177
+- 아카이브: `issue/cross-cutting/data/lookup-cost-and-indexing/` ⓒ(방안 비교 — 변형 E 항등 해시의 확장 해싱판) a295bb2a — 초안이 정정: 항등 해시도 전단사라 분할은 끝난다(명세 §9의 "끝없이 두 배"는 부정확) — 깊이가 키 개수가 아니라 키 비트 구조를 따르는 것이 문제
+- study-note 랩 기록(명세 §12): `lab/storage-labs/index-lab/README.md` 외 3파일 ba0c1ec8 (초안 Opus 워커 120.9k, 메인 검토) — 모두 study-note 브랜치 archive/2026-11-12, push 대기
