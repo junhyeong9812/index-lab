@@ -1,5 +1,6 @@
 //! 2단계 바닥층: 16KB 페이지 단위 저장소와 그 위의 Pager(실제 I/O 계수).
 
+pub mod file;
 pub mod pager;
 
 use std::io;
@@ -17,7 +18,7 @@ pub type PageId = u64;
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct Page(pub [u8; PAGE_SIZE]);
 
-/// 페이지 단위로 읽고 쓰는 저장소. 메모리(테스트)와 파일(diff 02) 두 구현이 같은 의미를 가진다.
+/// 페이지 단위로 읽고 쓰는 저장소. 메모리(테스트)와 파일 두 구현이 같은 의미를 가진다.
 pub trait Storage {
     /// 지금 저장소에 있는 페이지 수. 페이지 `0..page_count()`만 읽을 수 있다.
     fn page_count(&self) -> io::Result<u64>;
