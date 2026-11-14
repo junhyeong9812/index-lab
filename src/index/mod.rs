@@ -5,6 +5,7 @@
 pub mod btree;
 pub mod btree_page;
 pub mod hash;
+pub mod paged_btree;
 
 /// 키 → 값 인덱스.
 ///

@@ -88,6 +88,16 @@ impl LeafPage {
     pub fn values(&self) -> &[u64] {
         &self.values[..self.count as usize]
     }
+
+    /// `i` 자리에 끼우고 뒤를 한 칸씩 민다. 호출자가 `count < LEAF_CAPACITY`를 보장한다.
+    pub fn insert_at(&mut self, i: usize, key: u64, value: u64) {
+        let n = self.count as usize;
+        self.keys.copy_within(i..n, i + 1);
+        self.values.copy_within(i..n, i + 1);
+        self.keys[i] = key;
+        self.values[i] = value;
+        self.count += 1;
+    }
 }
 
 impl InternalPage {
@@ -104,6 +114,16 @@ impl InternalPage {
 
     pub fn children(&self) -> &[PageId] {
         &self.children[..self.count as usize + 1]
+    }
+
+    /// 구분자를 키 `i` 자리에, 그 오른쪽 자식을 자식 `i + 1` 자리에 끼운다.
+    pub fn insert_at(&mut self, i: usize, sep: u64, right: PageId) {
+        let n = self.count as usize;
+        self.keys.copy_within(i..n, i + 1);
+        self.children.copy_within(i + 1..n + 1, i + 2);
+        self.keys[i] = sep;
+        self.children[i + 1] = right;
+        self.count += 1;
     }
 }
 
