@@ -1,4 +1,4 @@
-# 2단계 — 버퍼풀 (diff 03)
+# 2단계 — 버퍼풀 (diff 03–04)
 
 ## 1. 구조
 
@@ -45,14 +45,47 @@ pub struct BufferPool<S: Storage> {
 
 버퍼풀은 할당 순서와 다른 순서로 내보낸다(새 페이지 6이 5보다 먼저 쓰일 수 있음). 01·02의 "구멍 금지"와 충돌 → "끝 뒤 쓰기 = 성장, 사이 페이지는 0"으로 변경. 할당 안 된 번호 쓰기는 Pager(`id < next`)가 계속 막는다. 대안(할당 즉시 0 페이지 쓰기)은 분할마다 write +1로 측정이 왜곡돼 기각.
 
+## 4-2. 블라인드 테스트와 Drop 안 패닉 (diff 04)
+
+블라인드 워커(구현 비열람)가 `tests/buffer_pool.rs`(예제 31 + 참조 모델 proptest 2)를 짰다. 실코드 변이: dirty 쓰기 생략 10 실패 · MRU 7 실패 · 핀 무시 → **프로세스 abort**.
+
+abort 경로:
+1. 핀 무시 → 핀된 프레임이 희생자 → `ledger.meta[victim] = FrameMeta::default()` (pins 0, pool.rs:262)
+2. 새 페이지 적재 중 `RefCell` 패닉(가드가 프레임을 빌리고 있음) — **1차 패닉**, 되감기 시작
+3. 되감기가 살아 있던 가드를 drop → `unpin` → `debug_assert!(m.pins > 0)` 실패 — **2차 패닉**
+4. 되감는 중 또 패닉 → Rust는 abort
+
+| | panic (되감기) | abort |
+|---|---|---|
+| 동작 | 호출 스택을 거슬러 오르며 살아 있는 값의 `Drop` 실행 | 프로세스 즉시 종료(SIGABRT) |
+| `catch_unwind` | 잡힌다 — `cargo test`가 테스트마다 감싸서 그 테스트만 FAILED | 못 잡는다 |
+| 나머지 테스트 | 계속 돈다 | 함께 죽는다, 결과 요약 줄도 없음 |
+
+실측(데모): `assert_eq!(1, 2)` 테스트는 FAILED 후 다음으로. `Drop` 안에서 패닉하는 값을 든 채 패닉한 테스트는 `panic in a destructor during cleanup … aborting` → SIGABRT, 뒤 테스트 미실행.
+
+왜 두 번째 패닉이면 abort인가: 되감기는 패닉 **하나**를 위로 운반하는 장치다. 운반 도중 두 번째가 생기면 둘을 동시에 처리할 방법이 없어 Rust는 포기한다. → **Drop 안에서는 패닉하지 마라.**
+
+수정(pool.rs:73-83):
+```rust
+debug_assert!(m.pins > 0 || std::thread::panicking(), "unpin of an unpinned frame");
+m.pins = m.pins.saturating_sub(1);
+```
+- 평소(`panicking() == false`): 검사 **켜짐** — 핀 1번에 언핀 2번 같은 장부 버그를 잡는다.
+- 되감는 중(`panicking() == true`): 검사 **꺼짐** — 1차 패닉이 그대로 전파되어 `catch_unwind`가 잡을 수 있게.
+- `saturating_sub`: 그냥 `-=`면 `u32` 0−1이 debug에선 오버플로 패닉(또 Drop 안 패닉), release에선 `u32::MAX`로 감겨 그 프레임이 영원히 핀 상태(내보내기 불가). 0에서 멈춰 둘 다 피한다.
+
 ## 5. 진행
 
 | diff | 게이트 |
 |---|---|
 | 03 | 1/2 fail(Q2) → 2/2 pass |
+| 04 | 1/2 fail → 2/2 fail → 설명 후 통과 |
 
 ## 6. 오답 노트
 
 - **Q2 "롤백"**: 밀려날 때 되돌리는 동작은 없다. `pager.write(old_id, 프레임)`은 프레임에 있는 **고친 내용**을 디스크로 보낸다. 쓰기(③)가 새 페이지 적재(④)보다 먼저라 그 순간 프레임엔 아직 페이지 4가 있다.
 - **Q2 "불일치"**: 프레임 ≠ 디스크인 상태는 dirty의 정의라 그 자체는 정상. 문제는 쓰지 않고 프레임을 **비운 뒤** — 그때 고친 값이 사라진다.
 - **Q2 첫 답 혼동**: "없으면"(값 소실)과 "항상"(값 정상·I/O 낭비) 두 경우를 섞음 → 따로 본다.
+- **04 Q1 "스레드가 잡고 있다"**: 스레드는 하나뿐. 잡고 있는 건 **가드**이고, 문제는 그 가드가 drop될 때 장부의 `pins`가 이미 0(`default()`)이라는 것.
+- **04 panic vs abort**: panic은 되감기(Drop 실행, `catch_unwind`로 멈춤 가능), abort는 즉시 종료(잡을 수 없음). 되감는 중 2차 패닉 = abort.
+- **04 `|| panicking()`**: 검사를 지운 게 아니라 되감는 중에만 끈다. 평소엔 이중 언핀 버그를 잡는다.
