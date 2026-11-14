@@ -2,6 +2,7 @@
 
 pub mod file;
 pub mod pager;
+pub mod pool;
 
 use std::io;
 
@@ -23,7 +24,8 @@ pub trait Storage {
     /// 지금 저장소에 있는 페이지 수. 페이지 `0..page_count()`만 읽을 수 있다.
     fn page_count(&self) -> io::Result<u64>;
     fn read_page(&mut self, id: PageId, page: &mut Page) -> io::Result<()>;
-    /// `id == page_count()`이면 끝에 한 장 붙는다. 그보다 뒤는 오류(구멍 금지).
+    /// 끝 뒤에 쓰면 저장소가 `id + 1`장으로 자라고, 그 사이 페이지는 0으로 채워진다.
+    /// 버퍼풀은 할당 순서와 다른 순서로 페이지를 내보내므로(새 페이지 6이 5보다 먼저 쓰일 수 있다) 구멍을 허용한다.
     fn write_page(&mut self, id: PageId, page: &Page) -> io::Result<()>;
 }
 
@@ -54,12 +56,11 @@ impl Storage for MemStorage {
     }
 
     fn write_page(&mut self, id: PageId, page: &Page) -> io::Result<()> {
-        let n = self.pages.len();
-        match (id as usize).cmp(&n) {
-            std::cmp::Ordering::Less => *self.pages[id as usize] = *page,
-            std::cmp::Ordering::Equal => self.pages.push(Box::new(*page)),
-            std::cmp::Ordering::Greater => return Err(out_of_range(id, n)),
+        let i = id as usize;
+        if i >= self.pages.len() {
+            self.pages.resize_with(i + 1, || Box::new(Page::zeroed()));
         }
+        *self.pages[i] = *page;
         Ok(())
     }
 }
@@ -100,16 +101,18 @@ mod tests {
     }
 
     #[test]
-    fn mem_storage_appends_and_rejects_holes() {
+    fn mem_storage_grows_past_end_with_zero_pages() {
         let mut s = MemStorage::new();
         let mut p = Page::zeroed();
         p.0[0] = 9;
-        assert!(s.write_page(1, &p).is_err(), "구멍 쓰기");
-        s.write_page(0, &p).unwrap();
-        assert_eq!(s.page_count().unwrap(), 1);
+        s.write_page(1, &p).unwrap();
+        assert_eq!(s.page_count().unwrap(), 2);
         let mut q = Page::zeroed();
+        q.0[0] = 1;
         s.read_page(0, &mut q).unwrap();
+        assert_eq!(q.0[0], 0, "사이 페이지는 0");
+        s.read_page(1, &mut q).unwrap();
         assert_eq!(q.0[0], 9);
-        assert!(s.read_page(1, &mut q).is_err());
+        assert!(s.read_page(2, &mut q).is_err());
     }
 }

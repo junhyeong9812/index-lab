@@ -53,13 +53,9 @@ impl Storage for FileStorage {
     }
 
     fn write_page(&mut self, id: PageId, page: &Page) -> io::Result<()> {
-        if id > self.pages {
-            return Err(out_of_range(id, self.pages));
-        }
+        // 끝 뒤 위치에 쓰면 파일이 늘고, 사이 바이트는 OS가 0으로 채운다.
         self.file.write_all_at(&page.0, offset(id))?;
-        if id == self.pages {
-            self.pages += 1;
-        }
+        self.pages = self.pages.max(id + 1);
         Ok(())
     }
 }
@@ -138,12 +134,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_holes_and_torn_files() {
+    fn grows_past_end_and_rejects_torn_files() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.db");
         let mut s = FileStorage::open(&path).unwrap();
-        assert!(s.write_page(1, &page_with(1)).is_err(), "구멍 쓰기");
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+        s.write_page(1, &page_with(1)).unwrap();
+        assert_eq!(s.page_count().unwrap(), 2);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            2 * PAGE_SIZE as u64
+        );
+        let mut p = page_with(5);
+        s.read_page(0, &mut p).unwrap();
+        assert_eq!((p.0[0], p.0[PAGE_SIZE - 1]), (0, 0), "사이 페이지는 0");
         drop(s);
         std::fs::write(&path, [0u8; 100]).unwrap();
         assert!(FileStorage::open(&path).is_err(), "페이지 배수가 아닌 파일");
