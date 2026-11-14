@@ -72,8 +72,13 @@ struct Ledger {
 impl Ledger {
     fn unpin(&mut self, frame: usize, dirtied: bool) {
         let m = &mut self.meta[frame];
-        debug_assert!(m.pins > 0);
-        m.pins -= 1;
+        // 가드의 Drop에서 불린다. 이미 패닉으로 되감는 중에 또 패닉하면 프로세스가 abort되므로,
+        // 그때는 검사를 건너뛰고 원래 패닉이 그대로 전파되게 한다.
+        debug_assert!(
+            m.pins > 0 || std::thread::panicking(),
+            "unpin of an unpinned frame"
+        );
+        m.pins = m.pins.saturating_sub(1);
         m.dirty |= dirtied;
     }
 }
