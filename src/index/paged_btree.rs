@@ -7,8 +7,8 @@ use crate::storage::pool::{BufferPool, PoolError, Result};
 use crate::storage::{PageId, Storage};
 
 use super::btree_page::{
-    INTERNAL_CAPACITY, InternalPage, KIND_INTERNAL, KIND_LEAF, LEAF_CAPACITY, LeafPage, MetaPage,
-    NO_PAGE, kind_of,
+    BTREE_MAGIC, INTERNAL_CAPACITY, InternalPage, KIND_INTERNAL, KIND_LEAF, LEAF_CAPACITY,
+    LeafPage, MetaPage, NO_PAGE, kind_of,
 };
 
 /// 노드가 갈라졌을 때 부모에 올릴 것: (구분자, 새 오른쪽 노드).
@@ -132,10 +132,11 @@ impl<S: Storage> PagedBTree<S> {
                 let mut page = self.pool.fetch_mut(id)?;
                 let node: &mut InternalPage = bytemuck::cast_mut(&mut *page);
                 node.insert_at(i, sep, right);
-                if node.count as usize > self.max_keys {
-                    unimplemented!("내부 노드 분할(push-up)은 diff 07");
+                if node.count as usize <= self.max_keys {
+                    return Ok((old, None));
                 }
-                Ok((old, None))
+                drop(page); // 부모 핀을 놓고 분할 — split_internal이 다시 잡는다(핀 ≤ 2)
+                Ok((old, Some(self.split_internal(id)?)))
             }
             _ => Err(corrupt(id)),
         }
@@ -188,6 +189,138 @@ impl<S: Storage> PagedBTree<S> {
         }
         Ok((sep, new_id))
     }
+
+    /// 넘친 내부 노드를 가운데 키로 나눈다. 가운데 키는 부모로 **이동**한다(push-up — 아래에 남지 않는다).
+    /// keys [k0 .. k(mid-1)] · k(mid) · [k(mid+1) ..] → 왼쪽(id) · 부모로 · 오른쪽(새 노드)
+    /// 자식은 mid+1개가 왼쪽에 남고 나머지가 오른쪽으로 간다. 내부 노드엔 형제 링크가 없어 이웃은 안 건드린다.
+    fn split_internal(&mut self, id: PageId) -> Result<Split> {
+        let mut left_page = self.pool.fetch_mut(id)?;
+        let (new_id, mut right_page) = self.pool.new_page()?; // 핀 2개: 왼쪽 + 새 오른쪽
+        let left: &mut InternalPage = bytemuck::cast_mut(&mut *left_page);
+        let right = InternalPage::init(&mut right_page);
+        let n = left.count as usize;
+        let mid = n / 2;
+        let sep = left.keys[mid];
+        right.keys[..n - mid - 1].copy_from_slice(&left.keys[mid + 1..n]);
+        right.children[..n - mid].copy_from_slice(&left.children[mid + 1..=n]);
+        right.count = (n - mid - 1) as u64;
+        left.count = mid as u64; // keys[mid]는 왼쪽에서 빠진다
+        Ok((sep, new_id))
+    }
+
+    /// `key`가 있어야 할 리프 번호. 한 번에 한 장만 쥔다.
+    fn find_leaf(&self, key: u64) -> Result<PageId> {
+        let mut id = self.root;
+        loop {
+            let page = self.pool.fetch(id)?;
+            match kind_of(&page) {
+                Some(KIND_INTERNAL) => {
+                    let node: &InternalPage = bytemuck::cast_ref(&*page);
+                    id = node.children()[node.keys().partition_point(|&sep| sep <= key)];
+                }
+                Some(KIND_LEAF) => return Ok(id),
+                _ => return Err(corrupt(id)),
+            }
+        }
+    }
+
+    /// 리프 `id`를 잠깐 쥐고 `f`로 읽는다(핀 1개). 리프가 아니면 손상.
+    fn with_leaf<T>(&self, id: PageId, f: impl FnOnce(&LeafPage) -> T) -> Result<T> {
+        let page = self.pool.fetch(id)?;
+        if kind_of(&page) != Some(KIND_LEAF) {
+            return Err(corrupt(id));
+        }
+        Ok(f(bytemuck::cast_ref(&*page)))
+    }
+
+    /// `lo <= key <= hi`를 오름차순으로. lo가 있어야 할 리프에서 시작해 `next`만 따라간다 — 핀은 한 번에 1장.
+    pub fn range(&self, lo: u64, hi: u64) -> Result<Vec<(u64, u64)>> {
+        let mut out = Vec::new();
+        if lo > hi {
+            return Ok(out);
+        }
+        let mut id = self.find_leaf(lo)?;
+        while id != NO_PAGE {
+            id = self.with_leaf(id, |leaf| {
+                let start = leaf.keys().partition_point(|&k| k < lo);
+                for (&k, &v) in leaf.keys()[start..].iter().zip(&leaf.values()[start..]) {
+                    if k > hi {
+                        return NO_PAGE; // 범위 끝 — 더 갈 필요 없음
+                    }
+                    out.push((k, v));
+                }
+                leaf.next
+            })?;
+        }
+        Ok(out)
+    }
+
+    /// `range`와 같은 범위를 내림차순으로. hi가 있어야 할 리프에서 시작해 `prev`만 따라간다.
+    pub fn range_rev(&self, lo: u64, hi: u64) -> Result<Vec<(u64, u64)>> {
+        let mut out = Vec::new();
+        if lo > hi {
+            return Ok(out);
+        }
+        let mut id = self.find_leaf(hi)?;
+        while id != NO_PAGE {
+            id = self.with_leaf(id, |leaf| {
+                let end = leaf.keys().partition_point(|&k| k <= hi);
+                for (&k, &v) in leaf.keys()[..end].iter().zip(&leaf.values()[..end]).rev() {
+                    if k < lo {
+                        return NO_PAGE;
+                    }
+                    out.push((k, v));
+                }
+                leaf.prev
+            })?;
+        }
+        Ok(out)
+    }
+
+    /// 이미 만들어진 저장소를 다시 연다 — 루트·높이·`max_keys`는 메타 페이지(0)에서 읽는다.
+    /// 메타가 아니거나(`magic`) `max_keys`가 `create` 조건을 벗어나면 `InvalidData`.
+    pub fn open(pool: BufferPool<S>) -> Result<Self> {
+        let (magic, root, height, max_keys) = {
+            let page = pool.fetch(META)?;
+            let m: &MetaPage = bytemuck::cast_ref(&*page);
+            (m.magic, m.root, m.height, m.max_keys as usize)
+        };
+        if magic != BTREE_MAGIC {
+            return Err(invalid("page 0 is not a B+tree meta page".into()));
+        }
+        if !(2..LEAF_CAPACITY.min(INTERNAL_CAPACITY)).contains(&max_keys) {
+            return Err(invalid(format!("meta max_keys {max_keys} out of range")));
+        }
+        Ok(Self {
+            pool,
+            root,
+            height,
+            max_keys,
+        })
+    }
+}
+
+/// 1단계 `Index` 계약엔 `Result`가 없다 → I/O·손상은 여기서만 panic(명세 Q6).
+impl<S: Storage> super::Index for PagedBTree<S> {
+    fn insert(&mut self, key: u64, value: u64) -> Option<u64> {
+        PagedBTree::insert(self, key, value).expect("paged B+tree insert")
+    }
+
+    fn get(&self, key: u64) -> Option<u64> {
+        PagedBTree::get(self, key).expect("paged B+tree get")
+    }
+
+    fn range(&self, lo: u64, hi: u64) -> Vec<(u64, u64)> {
+        PagedBTree::range(self, lo, hi).expect("paged B+tree range")
+    }
+
+    fn range_rev(&self, lo: u64, hi: u64) -> Vec<(u64, u64)> {
+        PagedBTree::range_rev(self, lo, hi).expect("paged B+tree range_rev")
+    }
+}
+
+fn invalid(msg: String) -> PoolError {
+    PoolError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, msg))
 }
 
 fn corrupt(id: PageId) -> PoolError {
@@ -293,7 +426,6 @@ mod tests {
 
     #[test]
     fn matches_btreemap_until_root_is_full() {
-        // max_keys 4: 루트 내부 노드가 키 4개(리프 5장)를 넘기 전까지 — 내부 분할은 diff 07.
         let mut t = tree(2, 4);
         let mut model = BTreeMap::new();
         for k in [7u64, 3, 9, 1, 5, 8, 2, 6, 4, 0, 7, 3] {
@@ -304,6 +436,140 @@ mod tests {
         }
         assert_eq!(walk_leaves(&t).0, model.keys().copied().collect::<Vec<_>>());
         assert_eq!(t.pool().pinned_frames(), 0, "핀 누수 없음");
+    }
+
+    /// 모든 내부 노드의 키를 모은다(구조 관찰용).
+    fn internal_keys(t: &PagedBTree<MemStorage>) -> Vec<u64> {
+        let (mut out, mut stack) = (Vec::new(), vec![t.root()]);
+        while let Some(id) = stack.pop() {
+            let page = t.pool().fetch(id).unwrap();
+            if kind_of(&page) == Some(KIND_INTERNAL) {
+                let node: &InternalPage = bytemuck::cast_ref(&*page);
+                out.extend_from_slice(node.keys());
+                stack.extend_from_slice(node.children());
+            }
+        }
+        out
+    }
+
+    fn model_range(m: &BTreeMap<u64, u64>, lo: u64, hi: u64) -> Vec<(u64, u64)> {
+        if lo > hi {
+            return Vec::new();
+        }
+        m.range(lo..=hi).map(|(&k, &v)| (k, v)).collect()
+    }
+
+    #[test]
+    fn internal_split_pushes_middle_key_up() {
+        let mut t = tree(2, 2);
+        for k in 1..=20 {
+            t.insert(k, k).unwrap();
+        }
+        assert!(t.height() >= 2, "내부 노드도 갈라져 루트가 위로 자랐다");
+        let mut seps = internal_keys(&t);
+        let n = seps.len();
+        seps.sort_unstable();
+        seps.dedup();
+        assert_eq!(
+            seps.len(),
+            n,
+            "push-up: 올라간 가운데 키는 아래 내부 노드에 남지 않는다"
+        );
+        for k in 1..=20 {
+            assert_eq!(t.get(k).unwrap(), Some(k));
+        }
+    }
+
+    #[test]
+    fn range_both_directions_match_btreemap() {
+        let mut t = tree(2, 3);
+        let mut model = BTreeMap::new();
+        for i in 0..200u64 {
+            let k = (i * 37) % 211; // 순서를 섞는다
+            assert_eq!(t.insert(k, i).unwrap(), model.insert(k, i));
+        }
+        for (lo, hi) in [(0, 300), (5, 5), (50, 120), (120, 50), (210, 400), (1, 0)] {
+            assert_eq!(
+                t.range(lo, hi).unwrap(),
+                model_range(&model, lo, hi),
+                "range {lo}..={hi}"
+            );
+            let mut rev = model_range(&model, lo, hi);
+            rev.reverse();
+            assert_eq!(t.range_rev(lo, hi).unwrap(), rev, "range_rev {lo}..={hi}");
+        }
+        assert_eq!(t.pool().pinned_frames(), 0, "핀 누수 없음");
+    }
+
+    /// A2 스모크: 프레임 4개 풀에서 높이 5 이상까지 — 내보내기가 계속 일어나도 정답과 같다.
+    #[test]
+    fn small_pool_grows_tall_tree() {
+        let mut t = tree(4, 2);
+        let mut model = BTreeMap::new();
+        let mut i = 0u64;
+        while t.height() < 5 {
+            let k = (i * 7919) % 100_003;
+            assert_eq!(t.insert(k, i).unwrap(), model.insert(k, i));
+            i += 1;
+        }
+        for (&k, &v) in &model {
+            assert_eq!(t.get(k).unwrap(), Some(v));
+        }
+        let all: Vec<_> = model.iter().map(|(&k, &v)| (k, v)).collect();
+        assert_eq!(t.range(0, u64::MAX).unwrap(), all);
+        assert!(
+            t.pool().stats().evictions > 0,
+            "풀이 작아 내보내기가 실제로 일어났다"
+        );
+        assert_eq!(t.pool().pinned_frames(), 0);
+    }
+
+    #[test]
+    fn reopen_from_file_sees_same_tree() {
+        use crate::storage::file::FileStorage;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bt.db");
+        let open_pool =
+            || BufferPool::new(Pager::new(FileStorage::open(&path).unwrap()).unwrap(), 3);
+        let (root, height) = {
+            let mut t = PagedBTree::create(open_pool(), 3).unwrap();
+            for k in 0..100 {
+                t.insert(k, k * 2).unwrap();
+            }
+            t.pool().flush().unwrap();
+            (t.root(), t.height())
+        }; // 닫힘
+        let t = PagedBTree::open(open_pool()).unwrap();
+        assert_eq!(
+            (t.root(), t.height()),
+            (root, height),
+            "루트·높이는 메타에서 복원"
+        );
+        let want: Vec<_> = (0..100).map(|k| (k, k * 2)).collect();
+        assert_eq!(t.range(0, 99).unwrap(), want);
+    }
+
+    #[test]
+    fn open_rejects_non_btree_file() {
+        let pool = BufferPool::new(Pager::new(MemStorage::new()).unwrap(), 2);
+        {
+            // 다른 값은 멀쩡하고 magic만 다르다(예: Hash 인덱스 파일) — magic 검사만이 잡는다.
+            let (_, mut page) = pool.new_page().unwrap();
+            MetaPage::init(&mut page, 1, 4).magic = u64::from_le_bytes(*b"IDXHASH_");
+        }
+        let err = PagedBTree::open(pool).err().expect("메타가 아니면 거부");
+        assert!(matches!(err, PoolError::Io(e) if e.kind() == std::io::ErrorKind::InvalidData));
+    }
+
+    #[test]
+    fn usable_through_index_trait() {
+        use crate::index::Index;
+        let mut idx: Box<dyn Index> = Box::new(tree(2, 4));
+        for k in [3, 1, 2] {
+            idx.insert(k, k * 10);
+        }
+        assert_eq!(idx.insert(2, 99), Some(20));
+        assert_eq!(idx.range_rev(1, 3), vec![(3, 30), (2, 99), (1, 10)]);
     }
 
     #[test]
