@@ -23,7 +23,7 @@ pub struct Hash {
 
 /// splitmix64 마무리 단계 — 비트를 고르게 섞는 전단사 함수(T8).
 /// 서로 다른 키는 해시도 다르므로, 분할을 거듭하면 언젠가 반드시 갈라진다.
-fn mix(key: u64) -> u64 {
+pub(crate) fn mix(key: u64) -> u64 {
     let mut z = key;
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
