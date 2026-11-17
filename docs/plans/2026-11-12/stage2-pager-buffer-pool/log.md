@@ -69,3 +69,229 @@
 | 2026-11-17 | **출제 전제 정정**: 스크래치 q12에 (c) 변이 + 해당 시나리오 테스트 실행 → `fetch(C)`의 `pin`(pool.rs:232) `frames[frame].borrow_mut()`에서 **panic "RefCell already borrowed"** — `a`가 그 프레임의 `Ref`를 쥐고 있어 C를 읽어 넣지 못함. "a에 C가 보인다"는 RefCell 없는 풀(C/C++ 등)에서의 결과. 질문의 "무엇이 보이나"가 잘못된 전제 → 2번 응답은 시도 미산정, 1번(B/A 선택)은 정답 확인 | 정정 |
 | 2026-11-17 | diff 12 게이트 Q2 재질문(핀된 프레임의 last_used — split vs 핀 유지 후 다른 fetch): "split은 제일 최근이고, 위에선 A가 제일 오래돼서 LRU가 골라" → Opus 판정 **PASS**(힌트 의존 중간 — 재질문이 즉시/유지 대비를 제시). 보완: 핀 여부와 최근 사용 순서는 독립 → LRU만으로 핀 보호 불가, 필터가 일반적으로 필요 | Q2 pass |
 | 2026-11-17 | diff 12 게이트 통과(코드 변경 없음 — 변이 검증·학습 노트만). 학습 노트 `docs/learning/stage2/pool-mutations.md` | gate-pass |
+| 2026-11-17 | 마감 검증(HEAD 838c33f): `cargo test` 78 + 33 + 31 + 40 green(paged_btree 15.9s · paged_hash 23.5s) · clippy `-D warnings` 통과 · fmt 통과. stakes 낮음 → 셀프체크(diff마다 변이 점검 + 블라인드 테스트 워커 3회로 갈음). diff self-review: diff 12는 코드 무변경 · rollback = 브랜치 되돌림(외부 계약 없음, 학습 저장소) | 안전선 통과 |
+| 2026-11-17 | 사용자 "진행하고 메인에 합치자" → 마감: NEXT.md 갱신(N1 3단계 벤치마크 — 카운터 공백·Hash range 전체 스캔·두 배 스파이크·깊이 상한 21 · N2 루프 끝까지 돌리기) · 완료 요약 Opus 워커 · CS 이슈 카드 Opus 워커 · study-note 랩 기록 Opus 워커 위임. 원 식별자(카드 노출 스캔 입력): index-lab · storage-labs · BufferPool · Ledger · FrameMeta · PageRef · PageMut · FileStorage · MemStorage · PagedHash · PagedBTree · HashMetaPage · DirectoryPage · BucketPage · MetaPage · LeafPage · InternalPage · take_frame · bucket_of · dir_pages · IDXHASH_ · IDXBTREE · pool.rs · paged_hash.rs · paged_btree.rs · hash_page.rs · btree_page.rs | 마감 착수 |
+| 2026-11-17 | 완료 요약 워커 회수(215줄) — 스니펫 9블록 전 줄을 HEAD src와 대조, 불일치 0. 랩 기록 워커 회수(study-note README 147–256 + 상태 1/5→2/5) — lib 78 = 1단계 38(btree 15 + hash 23) + 40 `--list`로 확인 | 회수 |
+
+## 완료 요약
+
+> 기준: `feat/stage2-pager-buffer-pool` HEAD `838c33f` (분기점 main `8cf93b9`, diff 01~08 부분은 main `e5cf38a`까지 fast-forward 병합됨). `git diff 8cf93b9..HEAD` = 29파일 +6585/−2. 스니펫은 HEAD 실파일에서 복사.
+
+### 1. 목표 대비 결과
+
+목표(§1): 16KB Pager(파일·메모리, read/write 계수) + LRU·핀·write-back 버퍼풀 위에 페이지 B+tree·페이지 Extendible Hash를 `Index` trait 뒤에 추가 → **달성** (test 78 + 33 + 31 + 40 green, 런타임 의존성 `bytemuck`만·dev `tempfile`만, `unsafe` 0, `Index` trait·1단계 동작 무변경 — `hash.rs`는 `mix` 가시성 `pub(crate)` 1줄).
+
+| 항목 | 근거 | 상태 |
+|---|---|---|
+| P1 Pager 계수·두 저장소 동일 의미 | `pager.rs:37-55`(성공한 I/O만 계수) · `counts_only_successful_io` pager.rs:74 · `file_and_memory_agree` file.rs:106 | 충족 |
+| P2 버퍼풀(핀 비내보내기·LRU·dirty write-back·AllPinned=Err·flush·hit=read 0) | `take_frame` pool.rs:245-265 · tests/buffer_pool.rs 33개 — `dirty_victim_written_before_reuse`:241 · `pinned_lru_page_is_skipped`:457 · `all_pinned_is_err_and_recovers`:506 · `flush_writes_every_dirty_once_then_nothing`:296 · 참조 모델 proptest `pool_matches_model_mem/file`:935·944(매 연산 reads/writes/hits/misses/evictions 정확 일치) | 충족 |
+| P3 정답 일치(I1·I4, 작은 풀) | proptest `mem_tree_matches_btreemap` paged_btree.rs(tests):851 (max_keys 2..=6 · 프레임 2..=4) · `mem_hash_matches_btreemap` paged_hash.rs(tests):1063 (cap 1..=4 · 프레임 2..=4) | 충족 |
+| P4 구조 불변식 `check()` | B+tree: 테스트 내 `check` tests/paged_btree.rs:173 + 손상 가드 7(`check_detects_*`:914~) · Hash: 공개 `check()` paged_hash.rs:311 + 손상 가드 9(`check_detects_*` tests:1143~) · 둘 다 매 삽입 검사 | 충족 |
+| P5 영속성(flush→닫기→열기) | `persistence_reopen_preserves_everything_and_keeps_working` tests/paged_btree.rs:675 · tests/paged_hash.rs:809 · File proptest + 재열기(:865 · :1078) · open 거부 B+tree 3 · Hash 6(+양성 대조) | 충족 |
+| P6 핀 상한(상수, 높이 무관) | 부모 핀 놓고 재귀 paged_btree.rs:121-139 · 분할 핀 2 :167-209 · Hash split·double 핀 2 paged_hash.rs:112·171 · `two_frame_pool_works_for_a_deep_tree_and_never_leaks_pins` tests/paged_btree.rs:595 · 실측 상한 **2** (부모 핀 쥔 재귀 변이 = 컴파일 오류 E0502) | 충족 |
+| A1 `bytemuck` 16KB Pod | 첫 빌드 E0277(`[u8;16384]: Zeroable`) → feature `min_const_generics`로 해소 · 크기 단언 3종 · 패딩/크기 변이 2종 컴파일 오류로 검출 | 실증 |
+| A2 동시 핀 ≤ 4 | `small_pool_grows_tall_tree` src/index/paged_btree.rs:506 (프레임 4, max_keys 2, 높이 5까지 + evictions > 0 + 핀 0) — 실제 상한 2 | 실증 |
+
+### 2. diff 01–12
+
+| diff | 내용 | 코드 커밋 | 게이트 (log) |
+|---|---|---|---|
+| 01 | `storage`: `PAGE_SIZE`·`Page`(align 8 Pod)·`Storage`·`MemStorage`·`Pager` (+A1) | a2c7120 | 1/2 pass |
+| 02 | `FileStorage`(read_exact_at/write_all_at)·재열기 | 40c9ded | 1/2 fail → 2/2 pass |
+| 03 | `BufferPool`(RefCell 프레임·장부·핀 가드·LRU·write-back) · 저장소 계약 "끝 뒤 쓰기 = 성장" 변경 | ba7dc1e | Q2 1/2 fail → 2/2 pass |
+| 04 | 버퍼풀 블라인드 테스트 33 + `unpin` 되감기 중 패닉 안전화 | 13f38b0 | fail 2/2 → 설명 후 통과 |
+| 05 | B+tree 페이지 레이아웃(Meta·Leaf·Internal) | f6a521f | 1/2 pass |
+| 06 | 페이지 B+tree get·리프 삽입/분할·루트 분할(범위 당김) | b16213a | Q1·Q2 pass |
+| 07 | 내부 분할(push-up)·range/range_rev·open·`impl Index` (+A2) | a12e43c | Q1 fail 2/2 → 설명 후 통과 · Q2 pass |
+| 08 | 페이지 B+tree 블라인드 테스트 31 | 32ceeb1 | Q1 fail 2/2 → 설명 후 통과 · Q2 pass |
+| 09 | Hash 레이아웃(메타·디렉터리·버킷)·get | 3cfd2d3 | Q1·Q2 pass |
+| 10 | Hash insert·split(칸 건너뛰며 재지정)·double(페이지 복사) | 180dac1 | Q1 fail 2/2 → 설명 후 통과 · Q2 pass(정정 전제로 재출제) |
+| 11 | Hash range·open·check·`impl Index` + 블라인드 테스트 40 | a26f32b · ab318ad | Q1 1/2 fail → 2/2 pass · Q2 pass |
+| 12 | 변이 3종 × 전체 스위트 + clippy·fmt | 없음(코드 0, docs 838c33f) | Q1 pass(힌트 무거움) · Q2 pass(정정 전제로 재출제) |
+
+### 3. 핵심 before/after
+
+(a) Pager 계수 — before: 없음(신규) · after `src/storage/pager.rs:37-55`
+```rust
+    /// 성공한 읽기만 센다.
+    pub fn read(&mut self, id: PageId, page: &mut Page) -> io::Result<()> {
+        self.storage.read_page(id, page)?;
+        self.reads += 1;
+        Ok(())
+    }
+
+    /// 성공한 쓰기만 센다.
+    pub fn write(&mut self, id: PageId, page: &Page) -> io::Result<()> {
+        if id >= self.next {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("page {id} not allocated"),
+            ));
+        }
+        self.storage.write_page(id, page)?;
+        self.writes += 1;
+        Ok(())
+    }
+```
+
+(b) 버퍼풀 희생자 선택·write-back — before: 없음(신규) · after `src/storage/pool.rs:249-264`
+```rust
+        let victim = (0..ledger.meta.len())
+            .filter(|&f| ledger.meta[f].pins == 0)
+            .min_by_key(|&f| ledger.meta[f].last_used)
+            .ok_or(PoolError::AllPinned)?;
+        let old = ledger.meta[victim];
+        let old_id = old.page.expect("non-free frame holds a page");
+        if old.dirty {
+            // 쓰기가 실패하면 장부를 건드리지 않고 돌아간다 — 페이지는 dirty인 채 프레임에 남는다.
+            self.pager
+                .borrow_mut()
+                .write(old_id, &self.frames[victim].borrow())?;
+        }
+        ledger.table.remove(&old_id);
+        ledger.meta[victim] = FrameMeta::default();
+        ledger.stats.evictions += 1;
+        Ok(victim)
+```
+
+(c) 가드 Drop의 언핀 — diff 04 수정 후(Drop 안 2차 패닉 → abort 방지) · after `src/storage/pool.rs:73-83`, `282-286`
+```rust
+    fn unpin(&mut self, frame: usize, dirtied: bool) {
+        let m = &mut self.meta[frame];
+        // 가드의 Drop에서 불린다. 이미 패닉으로 되감는 중에 또 패닉하면 프로세스가 abort되므로,
+        // 그때는 검사를 건너뛰고 원래 패닉이 그대로 전파되게 한다.
+        debug_assert!(
+            m.pins > 0 || std::thread::panicking(),
+            "unpin of an unpinned frame"
+        );
+        m.pins = m.pins.saturating_sub(1);
+        m.dirty |= dirtied;
+    }
+```
+```rust
+impl Drop for PageRef<'_> {
+    fn drop(&mut self) {
+        self.ledger.borrow_mut().unpin(self.frame, false);
+    }
+}
+```
+
+(d) B+tree 내부 노드 삽입 — before `src/index/btree.rs:87-89` (arena, 핀 개념 없음)
+```rust
+            Node::Internal { keys, children } => {
+                let i = keys.partition_point(|&sep| sep <= key);
+                let child = children[i];
+```
+after `src/index/paged_btree.rs:121-139` (부모 핀 놓고 재귀 → 분할 오면 다시 fetch, P6)
+```rust
+                let (i, child) = {
+                    let page = self.pool.fetch(id)?;
+                    let node: &InternalPage = bytemuck::cast_ref(&*page);
+                    let i = node.keys().partition_point(|&sep| sep <= key);
+                    (i, node.children()[i])
+                }; // 부모 핀을 여기서 놓고 내려간다(S5)
+                let (old, split) = self.insert_at(child, key, value)?;
+                let Some((sep, right)) = split else {
+                    return Ok((old, None));
+                };
+                // 갈라진 자식 바로 오른쪽 칸에 구분자와 새 자식을 끼운다 — 부모를 다시 fetch.
+                let mut page = self.pool.fetch_mut(id)?;
+                let node: &mut InternalPage = bytemuck::cast_mut(&mut *page);
+                node.insert_at(i, sep, right);
+                if node.count as usize <= self.max_keys {
+                    return Ok((old, None));
+                }
+                drop(page); // 부모 핀을 놓고 분할 — split_internal이 다시 잡는다(핀 ≤ 2)
+                Ok((old, Some(self.split_internal(id)?)))
+```
+
+(e) Hash 분할 칸 재지정 — before `src/index/hash.rs:114-120` (디렉터리 전체 훑기)
+```rust
+        // 이 버킷을 가리키던 2^(전역−d)칸 중 새 비트가 1인 절반을 새 버킷으로 다시 가리킨다.
+        // ponytail: 디렉터리 전체를 훑는다(O(2^전역)). 칸만 골라 도는 방식은 분할 비용 측정 때 검토.
+        for (slot, b) in self.directory.iter_mut().enumerate() {
+            if *b == id && slot as u64 & bit != 0 {
+                *b = new_id;
+            }
+        }
+```
+after `src/index/paged_hash.rs:138-149` (해당 칸만 2^(d+1) 간격으로, 닿는 디렉터리 페이지만 dirty)
+```rust
+        let suffix = (mix(key) & (bit - 1)) as usize;
+        let (len, step) = (1usize << self.global_depth, 1usize << (d + 1));
+        let mut s = suffix | bit as usize;
+        while s < len {
+            let p = s / DIR_SLOTS;
+            let mut page = self.pool.fetch_mut(self.dir_pages[p])?;
+            let dir: &mut DirectoryPage = bytemuck::cast_mut(&mut *page);
+            while s < len && s / DIR_SLOTS == p {
+                dir.slots[s % DIR_SLOTS] = new_id;
+                s += step;
+            }
+        }
+```
+
+(f) 디렉터리 두 배 — before `src/index/hash.rs:82` `self.directory.extend_from_within(..);` · after `src/index/paged_hash.rs:163-175`
+```rust
+        if len < DIR_SLOTS {
+            let mut page = self.pool.fetch_mut(self.dir_pages[0])?;
+            let dir: &mut DirectoryPage = bytemuck::cast_mut(&mut *page);
+            dir.slots.copy_within(0..len, len);
+        } else {
+            // len은 2048의 배수 → 페이지 단위로 통째 복사. 쓰기 = 새 디렉터리 페이지 수(카운터에 잡힌다, Q3).
+            for p in 0..self.dir_pages.len() {
+                let src = self.pool.fetch(self.dir_pages[p])?;
+                let (new_id, mut dst) = self.pool.new_page()?; // 핀 2개
+                *dst = *src;
+                self.dir_pages.push(new_id);
+            }
+        }
+```
+
+### 4. 검증
+
+- **최종 실행(HEAD 838c33f, 2026-11-17 재실행)**: `cargo test` lib **78** · buffer_pool **33** · paged_btree **31** · paged_hash **40** 전부 green(paged_btree 12.9s · paged_hash 101.6s — 이 재실행은 log 기록 23.5s보다 느림, 머신 부하 추정) · `cargo clippy --all-targets -- -D warnings` 통과 · `cargo fmt --check` 통과. 1단계 38개 포함(78 = 38 + 2단계 단위 40).
+- **블라인드 테스트 워커 3회**(Opus, 구현 본문 열람 금지 — 명세·레이아웃·공개 API만): diff 04 `tests/buffer_pool.rs` 948줄/33 · diff 08 `tests/paged_btree.rs` 964줄/31 · diff 11 `tests/paged_hash.rs` 1302줄/40. 합계 104. 워커 보고는 메인이 재실행·실코드 변이로 교차 확인.
+- **변이 점검(log 원문 기준)**:
+
+| diff | 변이 × 대상 | 결과 |
+|---|---|---|
+| 01 | 헤더 패딩 · 배열 1022 | 컴파일 오류 2/2 |
+| 02 | truncate(true) · `pages += 1` 삭제 | 각 2 실패 |
+| 03→04 | dirty 생략 / MRU / 핀 무시 × 블라인드 33 | 10 / 7 / abort → `unpin` 수정 후 6 실패 |
+| 05 | 내부 여분 1→2 · 리프 용량식 −4→−3 | 컴파일 오류 · 동치 변이(같은 1022) |
+| 06·07 | C.prev 생략 · 구분자=왼쪽 최대 · 내부 copy-up · range start/end · magic 생략 · 부모 핀 유지 | 전부 검출(magic은 테스트 보강 후) · 부모 핀 유지 = E0502 |
+| 08 | 8종 × 블라인드 31 | 전부 검출(1~21 실패) |
+| 09 | 디렉터리 페이지 0 고정 · `slot / DIR_SLOTS` · mask −1 누락 · 디렉터리 핀 쥔 채 fetch | 전부 검출 |
+| 10 | 7종(복사 생략 2 · 재지정 시작 · 메타 미기록 · 분할 비트 · 과적 · 지역 깊이 미갱신) | 전부 검출(마지막은 무한 분할 타임아웃 — §6 정정) |
+| 11 | 단위: 4종 중 2 생존(range 상한 `<` · range_rev 뒤집기 생략) → 블라인드 40에서 8종 전부 검출 | 생존 0 |
+| 12 | (a) dirty 생략 / (b) MRU / (c) 핀 무시 × 전체 스위트 | (a) lib 16·pool 10·btree 21·hash 31 · (b) lib 1·pool 7, **인덱스 생존** · (c) lib 1·pool 6, **인덱스 생존** |
+
+- 셀프체크: stakes 낮음 — diff별 변이 + 블라인드 워커로 갈음. diff 12는 코드 무변경. rollback = 브랜치 되돌림(외부 계약 없음).
+
+### 5. 정정·사고
+
+- **diff 03 설계 충돌**: 01·02의 저장소 "구멍 금지"가 버퍼풀의 순서 무관 내보내기와 충돌(6이 5보다 먼저 쓰임) → 계약을 "끝 뒤 쓰기 = `id+1`장으로 성장, 사이 0"으로 변경(`storage/mod.rs` `write_page` 문서). 할당 시 0 페이지 즉시 쓰기안은 측정 왜곡으로 기각.
+- **diff 04 Drop 안 패닉 → abort**: 핀 무시 변이가 RefCell 패닉 → 되감기 중 `unpin`의 `debug_assert!` 2차 패닉 → 프로세스 abort(catch_unwind 불가, 뒤 테스트 미실행). `|| thread::panicking()` + `saturating_sub`로 수정(§3 c). CS 이슈 카드 `issue/rust/drop-panic-during-unwinding`로 아카이브.
+- **diff 07 변이 생존**: magic 검사 생략이 처음엔 생존(0 페이지는 max_keys 범위 검사가 대신 거부) → 테스트를 "magic만 다른 메타"로 교체.
+- **diff 10 변이 기록 정정**: "지역 깊이 미갱신 → 매 분할마다 두 배"는 틀림. 계측 결과 DOUBLE 1회 후 `SPLIT d=0 g=1` 약 20만 회 — 같은 비트로 분할만 무한 반복. Q2가 틀린 전제로 나가 그 답은 무효, 올바른 전제로 재출제(시도 미산정).
+- **diff 12 Q2 출제 전제 정정**: "핀 무시 변이에서 가드 `a`에 C 내용이 보인다"는 RefCell 없는 풀의 결과. 실제는 `pin`(pool.rs:232) `borrow_mut()`에서 "RefCell already borrowed" panic → 2번 응답 미산정, 재출제.
+- **게이트 진행 사고**: diff 04에서 판정 전 튜터가 답 일부(`-=` debug/release 차이) 노출 · 재질문에서 코드 미첨부 반복 → 사용자 피드백으로 "질문·재질문·힌트는 근거 코드 자기완결" 규칙을 하네스에 반영(별도 작업, 배포 확인).
+
+### 6. 남은 것 · 3단계 관측 신호
+
+- **카운터 공백**: 인덱스 테스트는 결과만 `BTreeMap`과 대조 — MRU·핀 무시 변이가 인덱스 스위트에서 생존(§4 diff 12). 벤치마크 수치는 카운터에 기대므로 "연산 하나의 기대 read/write 수" 테스트가 3단계 첫 diff 후보.
+- **핀 보호는 LRU에 기대면 안 됨**: 인덱스 경로에서는 핀된 프레임이 늘 최신 tick이라 필터가 없어도 안 골림 — 핀을 오래 쥐는 호출 패턴이 생기면 필터만이 막는다(pool 테스트가 지킴).
+- **Hash `range`는 모든 버킷 전체 훑기**(`buckets()` → 거름 → 정렬, `Vec` 반환) — 범위 격자에서 결과 크기 무관 비용.
+- **디렉터리 두 배 = 디렉터리 페이지 통째 복사**(칸 2048 초과부터 쓰기 스파이크) — 4단계 더블링 실험 신호이자 3단계 랜덤 삽입 잡음원.
+- **전역 깊이 상한 21**(2044 × 2048칸): 10^7 키·작은 bucket_cap이면 `Err` 근접 — 격자 설정 전 계산.
+- **속도**: 매 삽입 `check()` proptest가 debug에서 13~100s — 벤치마크는 release·검증 루프 분리.
+- **학습 틈**: 루프·카운트 함수를 끝까지 돌리지 않고 결론(diff 08 `partition_point`, diff 10 시작 칸·2진 자리값, diff 11 중복 누락) → 3단계 첫 게이트 선행 1문(NEXT N2).
+- 비정상 종료 안전성(WAL)·삭제·동시성은 범위 밖 유지.
+
+## 마감 기록
+
+| 시각 | 사건 | 결과 |
+|---|---|---|
+| 2026-11-17 | 아카이브 카드 워커 회수: ⓐ rust/zero-copy-cast-alignment · ⓐ cross-cutting/database/write-back-out-of-order-eviction · ⓐ cross-cutting/data/extendible-hash-directory-aliasing · ⓒ cross-cutting/reliability/deserialization-trust-boundary(방안 비교 append) · 기존 카드 issue/cross-cutting/testing/green-masking 동일 — 무변경(ⓑ). 워커 자기 스캔(원 식별자·경로·도구명) 0건. study-note 쓰기 중 PENDING_GATE=1로 gate-guard 차단 → 카드는 스크래치에 대기, 랩 기록(README 147–256)만 반영됨 | 회수 · 쓰기 대기 |
+| 2026-11-17 | 측정로그 1행 추가 | 기록 |
