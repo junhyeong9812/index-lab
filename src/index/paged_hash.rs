@@ -9,7 +9,7 @@ use crate::storage::{PageId, Storage};
 
 use super::hash::mix;
 use super::hash_page::{
-    BUCKET_CAPACITY, BucketPage, DIR_SLOTS, DirectoryPage, HashMetaPage, MAX_DIR_PAGES,
+    BUCKET_CAPACITY, BucketPage, DIR_SLOTS, DirectoryPage, HASH_MAGIC, HashMetaPage, MAX_DIR_PAGES,
 };
 
 const META: PageId = 0;
@@ -201,6 +201,89 @@ impl<S: Storage> PagedHash<S> {
         (mix(key) & mask) as usize
     }
 
+    /// `lo <= key <= hi`를 오름차순으로. 해시는 키 순서를 모르므로 모든 버킷을 훑어 거른 뒤 정렬한다(1단계 T10).
+    /// `lo > hi`면 조건을 만족하는 키가 없어 빈 결과.
+    pub fn range(&self, lo: u64, hi: u64) -> Result<Vec<(u64, u64)>> {
+        let mut out = Vec::new();
+        for id in self.buckets()? {
+            let page = self.pool.fetch(id)?; // 버킷 한 장씩 — 핀 1개
+            let b: &BucketPage = bytemuck::cast_ref(&*page);
+            out.extend(
+                b.keys()
+                    .iter()
+                    .copied()
+                    .zip(b.values().iter().copied())
+                    .filter(|&(k, _)| lo <= k && k <= hi),
+            );
+        }
+        out.sort_unstable_by_key(|&(k, _)| k); // 키 중복이 없으니 불안정 정렬로 충분
+        Ok(out)
+    }
+
+    /// `range`와 같은 범위를 내림차순으로 — 같은 전체 훑기 후 뒤집는다(1단계 T13).
+    pub fn range_rev(&self, lo: u64, hi: u64) -> Result<Vec<(u64, u64)>> {
+        let mut out = self.range(lo, hi)?;
+        out.reverse();
+        Ok(out)
+    }
+
+    /// 서로 다른 버킷 페이지 번호(오름차순). 여러 칸이 한 버킷을 가리키므로 중복을 없앤다.
+    /// 디렉터리 페이지를 한 장씩 잡아 칸을 복사해 나온다 — 핀 1개.
+    fn buckets(&self) -> Result<Vec<PageId>> {
+        let len = 1usize << self.global_depth;
+        let mut ids = Vec::with_capacity(len);
+        for (p, &dir_id) in self.dir_pages.iter().enumerate() {
+            let page = self.pool.fetch(dir_id)?;
+            let dir: &DirectoryPage = bytemuck::cast_ref(&*page);
+            let n = (len - p * DIR_SLOTS).min(DIR_SLOTS);
+            ids.extend_from_slice(&dir.slots[..n]);
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        Ok(ids)
+    }
+
+    /// 이미 만들어진 저장소를 다시 연다 — 전역 깊이·버킷 용량·디렉터리 페이지 목록은 메타 페이지(0)에서 읽는다.
+    /// 메타가 아니거나(`magic`) 값이 `create`·두 배 조건을 벗어나면 `InvalidData`.
+    pub fn open(pool: BufferPool<S>) -> Result<Self> {
+        let (magic, g, bucket_cap, dir_pages) = {
+            let page = pool.fetch(META)?;
+            let m: &HashMetaPage = bytemuck::cast_ref(&*page);
+            let count = (m.dir_count as usize).min(MAX_DIR_PAGES); // 손상값으로 슬라이스 panic 나지 않게
+            (
+                m.magic,
+                m.global_depth,
+                m.bucket_cap as usize,
+                m.dir_pages[..count].to_vec(),
+            )
+        };
+        if magic != HASH_MAGIC {
+            return Err(invalid("page 0 is not a hash meta page".into()));
+        }
+        if !(1..BUCKET_CAPACITY).contains(&bucket_cap) {
+            return Err(invalid(format!(
+                "meta bucket_cap {bucket_cap} out of range"
+            )));
+        }
+        let max_depth = (MAX_DIR_PAGES * DIR_SLOTS).ilog2() as u64;
+        if g > max_depth {
+            return Err(invalid(format!("meta global_depth {g} > {max_depth}")));
+        }
+        let global_depth = g as u32;
+        if dir_pages.len() != (1usize << global_depth).div_ceil(DIR_SLOTS) {
+            return Err(invalid(format!(
+                "meta dir_count {} does not fit global_depth {global_depth}",
+                dir_pages.len()
+            )));
+        }
+        Ok(Self {
+            pool,
+            global_depth,
+            bucket_cap,
+            dir_pages,
+        })
+    }
+
     pub fn global_depth(&self) -> u32 {
         self.global_depth
     }
@@ -209,9 +292,113 @@ impl<S: Storage> PagedHash<S> {
         self.bucket_cap
     }
 
+    /// 서로 다른 버킷 수(디렉터리 칸 수가 아니라).
+    pub fn bucket_count(&self) -> Result<usize> {
+        Ok(self.buckets()?.len())
+    }
+
     pub fn pool(&self) -> &BufferPool<S> {
         &self.pool
     }
+
+    /// I3 구조 불변식 + 메타 일치 전체 검사(1단계 `Hash::check`와 같은 항목). 어긋나면 이유와 함께 panic.
+    ///
+    /// - 메타 페이지의 magic·전역 깊이·디렉터리 페이지 목록 = 메모리 사본, 디렉터리 페이지 수 = ceil(2^전역 / 2048)
+    /// - 지역 깊이 d ≤ 전역, d인 버킷을 가리키는 칸 수 = 2^(전역 − d), 그 칸들의 하위 d비트가 같다
+    /// - 버킷 안 키는 모두 `mix(key)`의 하위 d비트 = 그 접미사, 키 수 ≤ `bucket_cap`, 전체에서 키 중복 없음
+    ///
+    /// 핀은 한 번에 1개. I/O 오류도 panic(검사 전용).
+    pub fn check(&self) {
+        use std::collections::{HashMap, HashSet};
+        let g = self.global_depth;
+        {
+            let page = self.pool.fetch(META).expect("check: meta");
+            let m: &HashMetaPage = bytemuck::cast_ref(&*page);
+            assert_eq!(m.magic, HASH_MAGIC, "meta magic");
+            assert_eq!(
+                m.global_depth, g as u64,
+                "meta global_depth != global_depth()"
+            );
+            assert_eq!(m.bucket_cap, self.bucket_cap as u64, "meta bucket_cap");
+            assert_eq!(m.dir_pages(), &self.dir_pages[..], "meta dir_pages");
+        }
+        assert_eq!(
+            self.dir_pages.len(),
+            (1usize << g).div_ceil(DIR_SLOTS),
+            "directory page count for global depth {g}"
+        );
+        let mut slots_of: HashMap<PageId, Vec<usize>> = HashMap::new();
+        for (p, &dir_id) in self.dir_pages.iter().enumerate() {
+            let page = self.pool.fetch(dir_id).expect("check: directory");
+            let dir: &DirectoryPage = bytemuck::cast_ref(&*page);
+            for i in 0..((1usize << g) - p * DIR_SLOTS).min(DIR_SLOTS) {
+                slots_of
+                    .entry(dir.slots[i])
+                    .or_default()
+                    .push(p * DIR_SLOTS + i);
+            }
+        }
+        let mut seen = HashSet::new();
+        for (&b, slots) in &slots_of {
+            assert!(
+                b != META && !self.dir_pages.contains(&b),
+                "slot {} points at non-bucket page {b}",
+                slots[0]
+            );
+            let page = self.pool.fetch(b).expect("check: bucket");
+            let bucket: &BucketPage = bytemuck::cast_ref(&*page);
+            let d = bucket.local_depth;
+            assert!(d <= g as u64, "bucket {b} local depth {d} > global {g}");
+            assert_eq!(
+                slots.len(),
+                1usize << (g as u64 - d),
+                "bucket {b} (local depth {d}) slot count"
+            );
+            let mask = (1usize << d) - 1;
+            let suffix = slots[0] & mask;
+            assert!(
+                slots.iter().all(|&s| s & mask == suffix),
+                "bucket {b} slots {slots:?} disagree on low {d} bits"
+            );
+            assert!(
+                bucket.count as usize <= self.bucket_cap,
+                "bucket {b} holds {} > bucket_cap {}",
+                bucket.count,
+                self.bucket_cap
+            );
+            for &k in bucket.keys() {
+                assert_eq!(
+                    mix(k) as usize & mask,
+                    suffix,
+                    "key {k} in bucket {b} does not match suffix {suffix:#b}"
+                );
+                assert!(seen.insert(k), "key {k} stored twice");
+            }
+        }
+    }
+}
+
+/// 1단계 `Index` 계약엔 `Result`가 없다 → I/O·손상은 여기서만 panic(명세 Q6).
+impl<S: Storage> super::Index for PagedHash<S> {
+    fn insert(&mut self, key: u64, value: u64) -> Option<u64> {
+        PagedHash::insert(self, key, value).expect("paged hash insert")
+    }
+
+    fn get(&self, key: u64) -> Option<u64> {
+        PagedHash::get(self, key).expect("paged hash get")
+    }
+
+    fn range(&self, lo: u64, hi: u64) -> Vec<(u64, u64)> {
+        PagedHash::range(self, lo, hi).expect("paged hash range")
+    }
+
+    fn range_rev(&self, lo: u64, hi: u64) -> Vec<(u64, u64)> {
+        PagedHash::range_rev(self, lo, hi).expect("paged hash range_rev")
+    }
+}
+
+fn invalid(msg: String) -> PoolError {
+    PoolError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, msg))
 }
 
 #[cfg(test)]
@@ -352,62 +539,16 @@ mod tests {
         );
     }
 
-    /// I3 구조 검사(테스트용 — 공개 `check()`는 diff 11): 디렉터리를 페이지에서 읽어
-    /// 버킷마다 가리키는 칸 수 = 2^(전역−지역), 그 칸들의 하위 d비트 = 버킷 키들의 `mix` 접미사.
-    /// 반환: 모든 (키, 값).
+    /// 공개 `check()` + 핀 누수 0, 모든 (키, 값)을 돌려준다.
     fn check_i3(t: &PagedHash<MemStorage>) -> Vec<(u64, u64)> {
-        use std::collections::HashMap;
-        let g = t.global_depth;
-        assert_eq!(
-            t.dir_pages.len(),
-            (1usize << g).div_ceil(DIR_SLOTS),
-            "디렉터리 페이지 수"
-        );
-        {
-            let page = t.pool().fetch(META).unwrap();
-            let m: &HashMetaPage = bytemuck::cast_ref(&*page);
-            assert_eq!(m.global_depth, g as u64, "메타 global_depth");
-            assert_eq!(m.dir_pages(), &t.dir_pages[..], "메타 dir_pages");
-        }
-        let mut slots_of: HashMap<PageId, Vec<usize>> = HashMap::new();
-        for s in 0..1usize << g {
-            let page = t.pool().fetch(t.dir_pages[s / DIR_SLOTS]).unwrap();
-            let dir: &DirectoryPage = bytemuck::cast_ref(&*page);
-            slots_of
-                .entry(dir.slots[s % DIR_SLOTS])
-                .or_default()
-                .push(s);
-        }
-        let mut all = Vec::new();
-        for (&b, slots) in &slots_of {
-            let page = t.pool().fetch(b).unwrap();
-            let bucket: &BucketPage = bytemuck::cast_ref(&*page);
-            let d = bucket.local_depth as u32;
-            assert!(d <= g, "버킷 {b} 지역 깊이 {d} > 전역 {g}");
-            assert_eq!(slots.len(), 1 << (g - d), "버킷 {b}을 가리키는 칸 수");
-            let mask = (1usize << d) - 1;
-            let suffix = slots[0] & mask;
-            assert!(
-                slots.iter().all(|&s| s & mask == suffix),
-                "버킷 {b} 칸 접미사 불일치"
-            );
-            assert!(bucket.keys().len() <= t.bucket_cap, "버킷 {b} 과적");
-            for (&k, &v) in bucket.keys().iter().zip(bucket.values()) {
-                assert_eq!(
-                    mix(k) as usize & mask,
-                    suffix,
-                    "키 {k}가 버킷 {b}의 접미사와 다르다"
-                );
-                all.push((k, v));
-            }
-        }
+        t.check();
+        let all = t.range(0, u64::MAX).unwrap();
         assert_eq!(t.pool().pinned_frames(), 0, "핀 누수");
         all
     }
 
     fn assert_matches(t: &PagedHash<MemStorage>, model: &std::collections::BTreeMap<u64, u64>) {
-        let mut all = check_i3(t);
-        all.sort_unstable();
+        let all = check_i3(t);
         assert_eq!(all, model.iter().map(|(&k, &v)| (k, v)).collect::<Vec<_>>());
         for (&k, &v) in model {
             assert_eq!(t.get(k).unwrap(), Some(v), "get({k})");
